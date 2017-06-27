@@ -41,7 +41,8 @@ uint256 CBlockHeader::GetHash(const Consensus::Params& consensusParams) const
     case HashAlgorithm::HASH160:
         CHash160().Write({pbegin, len}).Finalize({hash.begin(), CHash160::OUTPUT_SIZE});
         break;
-    case HashAlgorithm::SHA256d: // handled above
+    case HashAlgorithm::SHA256d:      // handled above
+    case HashAlgorithm::NUM_HASH_ALGOS: // PowAlgorithmForTime never returns the sentinel
         assert(false);
     }
 

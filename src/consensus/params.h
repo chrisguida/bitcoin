@@ -138,12 +138,24 @@ struct Params {
     /** By default assume that the signatures in ancestors of this block are valid */
     uint256 defaultAssumeValid;
 
-    /** Hardfork parameters */
+    /**
+     * Proof-of-work-change hardfork parameters.
+     *
+     * Before HardforkTime, blocks are hashed with SHA256d (the historical
+     * algorithm). At or after HardforkTime, PowChangeAlgo selects the algorithm.
+     * The special value NUM_HASH_ALGOS selects a rotating (per-hour) algorithm,
+     * used to exercise the plumbing on regtest. Defaults leave the hardfork
+     * unscheduled (HardforkTime == max), so behaviour is unchanged.
+     */
     int64_t HardforkTime{std::numeric_limits<int64_t>::max()};
     HashAlgorithm PowChangeAlgo{HashAlgorithm::SHA256d};
     int nPowChangeTargetShift{20};
     HashAlgorithm PowAlgorithmForTime(int64_t nTime) const {
         if (nTime >= HardforkTime) {
+            if (PowChangeAlgo == HashAlgorithm::NUM_HASH_ALGOS) {
+                // Special value: rotate through every algorithm hourly (testing).
+                return (HashAlgorithm)((nTime / 3600) % (unsigned int)HashAlgorithm::NUM_HASH_ALGOS);
+            }
             return PowChangeAlgo;
         }
         return HashAlgorithm::SHA256d;

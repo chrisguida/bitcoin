@@ -18,11 +18,19 @@
 #include <string>
 #include <vector>
 
-enum class HashAlgorithm {
+/** Proof-of-work hash algorithms.
+ *
+ * Used by the consensus PoW-change plumbing to select which hash a block
+ * header is hashed with, based on the block time. NUM_HASH_ALGOS doubles as a
+ * count sentinel and, when stored in Consensus::Params::PowChangeAlgo, as a
+ * special value selecting a rotating (per-hour) algorithm for testing.
+ */
+enum class HashAlgorithm : unsigned int {
     SHA256,
     SHA256d,
     RIPEMD160,
     HASH160,
+    NUM_HASH_ALGOS,
 };
 
 typedef uint256 ChainCode;
