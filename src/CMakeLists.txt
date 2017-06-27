@@ -110,7 +110,6 @@ add_library(bitcoin_consensus STATIC EXCLUDE_FROM_ALL
   consensus/merkle.cpp
   consensus/tx_check.cpp
   hash.cpp
-  primitives/block.cpp
   primitives/transaction.cpp
   pubkey.cpp
   script/interpreter.cpp
@@ -173,6 +172,9 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   policy/feerate.cpp
   policy/policy.cpp
   pow.cpp
+  # In bitcoin_common (not bitcoin_consensus) because CBlockHeader::GetHash()
+  # selects the PoW algorithm via the chain's consensus parameters (Params()).
+  primitives/block.cpp
   protocol.cpp
   psbt.cpp
   rpc/rawtransaction_util.cpp

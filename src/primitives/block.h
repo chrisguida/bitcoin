@@ -11,6 +11,10 @@
 #include <uint256.h>
 #include <util/time.h>
 
+namespace Consensus {
+struct Params;
+} // namespace Consensus
+
 /** Nodes collect new transactions into a block, hash them into a hash tree,
  * and scan through nonce values to make the block's hash satisfy proof-of-work
  * requirements.  When they solve the proof-of-work, they broadcast the block
@@ -51,6 +55,10 @@ public:
         return (nBits == 0);
     }
 
+    /** Hash of the header using the PoW algorithm selected for the given
+     *  consensus parameters and this header's nTime. */
+    uint256 GetHash(const Consensus::Params&) const;
+    /** Hash of the header using the active chain's consensus parameters. */
     uint256 GetHash() const;
 
     NodeSeconds Time() const
