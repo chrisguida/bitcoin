@@ -137,6 +137,9 @@ struct Params {
     /** By default assume that the signatures in ancestors of this block are valid */
     uint256 defaultAssumeValid;
 
+    /** Hardfork parameters */
+    int64_t HardforkTime{std::numeric_limits<int64_t>::max()};
+
     /**
      * If true, witness commitments contain a payload equal to a Bitcoin Script solution
      * to the signet challenge. See BIP325.
