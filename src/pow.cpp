@@ -49,6 +49,18 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
         nBits = CalculateNextWorkRequired(pindexLast, pindexFirst->GetBlockTime(), params);
     }
 
+    if (params.PowAlgorithmForTime(pblock->nTime) != params.PowAlgorithmForTime(pindexLast->nTime)) {
+        // Adjust the target for the first block mined under a new PoW algorithm.
+        arith_uint256 bnNew;
+        bnNew.SetCompact(nBits);
+        bnNew <<= params.nPowChangeTargetShift;
+        const arith_uint256 bnPowLimit = UintToArith256(params.powLimit);
+        if (bnNew > bnPowLimit) {
+            bnNew = bnPowLimit;
+        }
+        nBits = bnNew.GetCompact();
+    }
+
     return nBits;
 }
 

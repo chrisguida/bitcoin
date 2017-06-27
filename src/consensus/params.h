@@ -140,6 +140,7 @@ struct Params {
 
     /** Hardfork parameters */
     int64_t HardforkTime{std::numeric_limits<int64_t>::max()};
+    int nPowChangeTargetShift{20};
     HashAlgorithm PowAlgorithmForTime(int64_t nTime) const {
         return HashAlgorithm::SHA256d;
     }
