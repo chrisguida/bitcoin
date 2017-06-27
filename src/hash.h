@@ -18,6 +18,13 @@
 #include <string>
 #include <vector>
 
+enum class HashAlgorithm {
+    SHA256,
+    SHA256d,
+    RIPEMD160,
+    HASH160,
+};
+
 typedef uint256 ChainCode;
 
 /** A hasher class for Bitcoin's 256-bit hash (double SHA-256). */

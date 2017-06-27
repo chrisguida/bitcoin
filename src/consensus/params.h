@@ -6,6 +6,7 @@
 #ifndef BITCOIN_CONSENSUS_PARAMS_H
 #define BITCOIN_CONSENSUS_PARAMS_H
 
+#include <hash.h>
 #include <uint256.h>
 
 #include <chrono>
@@ -139,6 +140,9 @@ struct Params {
 
     /** Hardfork parameters */
     int64_t HardforkTime{std::numeric_limits<int64_t>::max()};
+    HashAlgorithm PowAlgorithmForTime(int64_t nTime) const {
+        return HashAlgorithm::SHA256d;
+    }
 
     /**
      * If true, witness commitments contain a payload equal to a Bitcoin Script solution
