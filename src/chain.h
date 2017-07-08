@@ -296,6 +296,12 @@ public:
 
     std::string ToString() const;
 
+    /** The earliest valid timestamp for a block built on top of this one.
+     *  Normally GetMedianTimePast()+1, but across a PoW-algorithm change it is
+     *  advanced to the first timestamp that uses this block's algorithm, so a
+     *  child cannot reach back into the previous algorithm's time range. */
+    int64_t GetEarliestNextBlockTime(const Consensus::Params&) const;
+
     //! Check whether this block index entry is valid up to the passed validity level.
     bool IsValid(enum BlockStatus nUpTo = BLOCK_VALID_TRANSACTIONS) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main)

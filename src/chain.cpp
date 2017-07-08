@@ -4,6 +4,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <chain.h>
+
+#include <consensus/params.h>
 #include <tinyformat.h>
 #include <util/time.h>
 
@@ -120,6 +122,28 @@ const CBlockIndex* CBlockIndex::GetAncestor(int height) const
 CBlockIndex* CBlockIndex::GetAncestor(int height)
 {
     return const_cast<CBlockIndex*>(static_cast<const CBlockIndex*>(this)->GetAncestor(height));
+}
+
+int64_t CBlockIndex::GetEarliestNextBlockTime(const Consensus::Params& consensusParams) const
+{
+    int64_t nMinTime = GetMedianTimePast() + 1;
+    int64_t nMaxTime = GetBlockTime();
+    const auto current_pow_algo = consensusParams.PowAlgorithmForTime(nMaxTime);
+    if (nMinTime < nMaxTime && current_pow_algo != consensusParams.PowAlgorithmForTime(nMinTime)) {
+        // A PoW-algorithm change falls within [nMinTime, nMaxTime); binary
+        // search for the first timestamp that uses this block's algorithm.
+        int64_t nTryTime;
+        ++nMinTime;
+        while (nMinTime < nMaxTime) {
+            nTryTime = nMinTime + ((nMaxTime - nMinTime) / 2);
+            if (current_pow_algo != consensusParams.PowAlgorithmForTime(nTryTime)) {
+                nMinTime = nTryTime + 1;
+            } else {
+                nMaxTime = nTryTime - 1;
+            }
+        }
+    }
+    return nMinTime;
 }
 
 void CBlockIndex::BuildSkip()
