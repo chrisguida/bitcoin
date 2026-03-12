@@ -766,7 +766,7 @@ private:
     std::atomic<NodeId> m_filter_download_peer{-1};
     /** Number of getcfilters requests in flight. */
     std::atomic<int> m_filter_download_inflight{0};
-    static constexpr int MAX_FILTER_DOWNLOAD_BATCH = 100;
+    static constexpr int MAX_FILTER_DOWNLOAD_BATCH = 1000;
     static constexpr int MAX_FILTER_DOWNLOAD_INFLIGHT = 1000;
     void ProcessCFilter(CNode& pfrom, DataStream& vRecv);
     void MaybeSendGetCFilters(CNode& pto, Peer& peer);

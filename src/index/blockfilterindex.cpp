@@ -531,12 +531,8 @@ bool BlockFilterIndex::NeedsFilterDownload() const
 {
     if (m_headers_only) return false;
 
-    // Check if we have a height-0 entry with a null hash (headers-only legacy entry).
-    std::pair<uint256, DBVal> read_out;
-    if (!m_db->Read(DBHeightKey(0), read_out)) {
-        return false; // No entries at all — normal fresh index, will sync from blocks.
-    }
-    return read_out.second.hash.IsNull();
+    // Check if any entry has a null hash (headers-only legacy entry needing filter data).
+    return GetNextFilterDownloadHeight() >= 0;
 }
 
 int BlockFilterIndex::GetNextFilterDownloadHeight() const
@@ -611,6 +607,12 @@ bool BlockFilterIndex::StoreDownloadedFilter(const CBlockIndex* block_index, con
     }
 
     m_next_filter_pos.nPos += bytes_written;
+
+    // Persist the filter position so we can resume after restart.
+    if (!m_db->Write(DB_FILTER_POS, m_next_filter_pos)) {
+        return false;
+    }
+
     return true;
 }
 
