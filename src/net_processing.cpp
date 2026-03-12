@@ -3198,7 +3198,7 @@ bool PeerManagerImpl::PrepareBlockFilterRequest(CNode& node, Peer& peer,
     }
 
     filter_index = GetBlockFilterIndex(filter_type);
-    if (!filter_index) {
+    if (!filter_index || filter_index->IsHeadersOnly()) {
         LogDebug(BCLog::NET, "Filter index for supported type %s not found\n", BlockFilterTypeName(filter_type));
         return false;
     }

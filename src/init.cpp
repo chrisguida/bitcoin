@@ -2041,6 +2041,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         node.indexes.emplace_back(GetBlockFilterIndex(filter_type));
     }
 
+    // Always init BASIC block filter index in headers-only mode if not already
+    // initialized above. This unconditionally builds the filter header chain
+    // (~27MB) during IBD, enabling pruned nodes to later download and verify
+    // full filters from peers without trusting them.
+    if (g_enabled_filter_types.count(BlockFilterType::BASIC) == 0) {
+        InitBlockFilterIndex([&]{ return interfaces::MakeChain(node); }, BlockFilterType::BASIC, /*n_cache_size=*/0, /*f_memory=*/false, /*f_wipe=*/do_reindex, /*headers_only=*/true);
+        node.indexes.emplace_back(GetBlockFilterIndex(BlockFilterType::BASIC));
+    }
+
     if (args.GetBoolArg("-coinstatsindex", DEFAULT_COINSTATSINDEX)) {
         g_coin_stats_index = std::make_unique<CoinStatsIndex>(interfaces::MakeChain(node), /*cache_size=*/0, false, do_reindex);
         node.indexes.emplace_back(g_coin_stats_index.get());

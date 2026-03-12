@@ -30,6 +30,7 @@ class BlockFilterIndex final : public BaseIndex
 {
 private:
     BlockFilterType m_filter_type;
+    bool m_headers_only;  //!< If true, only store filter headers, not full filters (flat files).
     std::unique_ptr<BaseIndex::DB> m_db;
 
     FlatFilePos m_next_filter_pos;
@@ -65,7 +66,11 @@ protected:
 public:
     /** Constructs the index, which becomes available to be queried. */
     explicit BlockFilterIndex(std::unique_ptr<interfaces::Chain> chain, BlockFilterType filter_type,
-                              size_t n_cache_size, bool f_memory = false, bool f_wipe = false);
+                              size_t n_cache_size, bool f_memory = false, bool f_wipe = false,
+                              bool headers_only = false);
+
+    /** Whether this index is in headers-only mode (no full filter storage). */
+    bool IsHeadersOnly() const { return m_headers_only; }
 
     BlockFilterType GetFilterType() const { return m_filter_type; }
 
@@ -98,7 +103,8 @@ void ForEachBlockFilterIndex(std::function<void (BlockFilterIndex&)> fn);
  * a new index is created and false if one has already been initialized.
  */
 bool InitBlockFilterIndex(std::function<std::unique_ptr<interfaces::Chain>()> make_chain, BlockFilterType filter_type,
-                          size_t n_cache_size, bool f_memory = false, bool f_wipe = false);
+                          size_t n_cache_size, bool f_memory = false, bool f_wipe = false,
+                          bool headers_only = false);
 
 /**
  * Destroy the block filter index with the given type. Returns false if no such index exists. This

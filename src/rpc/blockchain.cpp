@@ -3346,7 +3346,7 @@ static RPCHelpMan getblockfilter()
     }
 
     BlockFilterIndex* index = GetBlockFilterIndex(filtertype);
-    if (!index) {
+    if (!index || index->IsHeadersOnly()) {
         throw JSONRPCError(RPC_MISC_ERROR, "Index is not enabled for filtertype " + filtertype_name);
     }
 

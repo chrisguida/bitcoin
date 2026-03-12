@@ -99,9 +99,11 @@ struct DBHashKey {
 static std::map<BlockFilterType, BlockFilterIndex> g_filter_indexes;
 
 BlockFilterIndex::BlockFilterIndex(std::unique_ptr<interfaces::Chain> chain, BlockFilterType filter_type,
-                                   size_t n_cache_size, bool f_memory, bool f_wipe)
+                                   size_t n_cache_size, bool f_memory, bool f_wipe,
+                                   bool headers_only)
     : BaseIndex(std::move(chain), BlockFilterTypeName(filter_type) + " block filter index")
     , m_filter_type(filter_type)
+    , m_headers_only(headers_only)
 {
     const std::string& filter_name = BlockFilterTypeName(filter_type);
     if (filter_name.empty()) throw std::invalid_argument("unknown filter_type");
@@ -110,24 +112,28 @@ BlockFilterIndex::BlockFilterIndex(std::unique_ptr<interfaces::Chain> chain, Blo
     fs::create_directories(path);
 
     m_db = std::make_unique<BaseIndex::DB>(path / "db", n_cache_size, f_memory, f_wipe);
-    m_filter_fileseq = std::make_unique<FlatFileSeq>(std::move(path), "fltr", FLTR_FILE_CHUNK_SIZE);
+    if (!m_headers_only) {
+        m_filter_fileseq = std::make_unique<FlatFileSeq>(std::move(path), "fltr", FLTR_FILE_CHUNK_SIZE);
+    }
 }
 
 bool BlockFilterIndex::CustomInit(const std::optional<interfaces::BlockRef>& block)
 {
-    if (!m_db->Read(DB_FILTER_POS, m_next_filter_pos)) {
-        // Check that the cause of the read failure is that the key does not exist. Any other errors
-        // indicate database corruption or a disk failure, and starting the index would cause
-        // further corruption.
-        if (m_db->Exists(DB_FILTER_POS)) {
-            LogError("%s: Cannot read current %s state; index may be corrupted\n",
-                         __func__, GetName());
-            return false;
-        }
+    if (!m_headers_only) {
+        if (!m_db->Read(DB_FILTER_POS, m_next_filter_pos)) {
+            // Check that the cause of the read failure is that the key does not exist. Any other errors
+            // indicate database corruption or a disk failure, and starting the index would cause
+            // further corruption.
+            if (m_db->Exists(DB_FILTER_POS)) {
+                LogError("%s: Cannot read current %s state; index may be corrupted\n",
+                             __func__, GetName());
+                return false;
+            }
 
-        // If the DB_FILTER_POS is not set, then initialize to the first location.
-        m_next_filter_pos.nFile = 0;
-        m_next_filter_pos.nPos = 0;
+            // If the DB_FILTER_POS is not set, then initialize to the first location.
+            m_next_filter_pos.nFile = 0;
+            m_next_filter_pos.nPos = 0;
+        }
     }
 
     if (block) {
@@ -144,6 +150,8 @@ bool BlockFilterIndex::CustomInit(const std::optional<interfaces::BlockRef>& blo
 
 bool BlockFilterIndex::CustomCommit(CDBBatch& batch)
 {
+    if (m_headers_only) return true;
+
     const FlatFilePos& pos = m_next_filter_pos;
 
     // Flush current filter file to disk.
@@ -288,21 +296,24 @@ bool BlockFilterIndex::CustomAppend(const interfaces::BlockInfo& block)
 
 bool BlockFilterIndex::Write(const BlockFilter& filter, uint32_t block_height, const uint256& filter_header)
 {
-    size_t bytes_written = WriteFilterToDisk(m_next_filter_pos, filter);
-    if (bytes_written == 0) return false;
-
     std::pair<uint256, DBVal> value;
     value.first = filter.GetBlockHash();
-    value.second.hash = filter.GetHash();
     value.second.header = filter_header;
-    value.second.pos = m_next_filter_pos;
 
-    if (!m_db->Write(DBHeightKey(block_height), value)) {
-        return false;
+    if (m_headers_only) {
+        // In headers-only mode, store only the filter header — no flat file write.
+        value.second.hash.SetNull();
+        value.second.pos = FlatFilePos();
+    } else {
+        size_t bytes_written = WriteFilterToDisk(m_next_filter_pos, filter);
+        if (bytes_written == 0) return false;
+
+        value.second.hash = filter.GetHash();
+        value.second.pos = m_next_filter_pos;
+        m_next_filter_pos.nPos += bytes_written;
     }
 
-    m_next_filter_pos.nPos += bytes_written;
-    return true;
+    return m_db->Write(DBHeightKey(block_height), value);
 }
 
 [[nodiscard]] static bool CopyHeightIndexToHashIndex(CDBIterator& db_it, CDBBatch& batch,
@@ -345,10 +356,12 @@ bool BlockFilterIndex::CustomRewind(const interfaces::BlockRef& current_tip, con
         return false;
     }
 
-    // The latest filter position gets written in Commit by the call to the BaseIndex::Rewind.
-    // But since this creates new references to the filter, the position should get updated here
-    // atomically as well in case Commit fails.
-    batch.Write(DB_FILTER_POS, m_next_filter_pos);
+    if (!m_headers_only) {
+        // The latest filter position gets written in Commit by the call to the BaseIndex::Rewind.
+        // But since this creates new references to the filter, the position should get updated here
+        // atomically as well in case Commit fails.
+        batch.Write(DB_FILTER_POS, m_next_filter_pos);
+    }
     if (!m_db->WriteBatch(batch)) return false;
 
     // Update cached header
@@ -435,6 +448,8 @@ static bool LookupRange(CDBWrapper& db, const std::string& index_name, int start
 
 bool BlockFilterIndex::LookupFilter(const CBlockIndex* block_index, BlockFilter& filter_out) const
 {
+    if (m_headers_only) return false;
+
     DBVal entry;
     if (!LookupOne(*m_db, block_index, entry)) {
         return false;
@@ -476,6 +491,8 @@ bool BlockFilterIndex::LookupFilterHeader(const CBlockIndex* block_index, uint25
 bool BlockFilterIndex::LookupFilterRange(int start_height, const CBlockIndex* stop_index,
                                          std::vector<BlockFilter>& filters_out) const
 {
+    if (m_headers_only) return false;
+
     std::vector<DBVal> entries;
     if (!LookupRange(*m_db, m_name, start_height, stop_index, entries)) {
         return false;
@@ -522,12 +539,13 @@ void ForEachBlockFilterIndex(std::function<void (BlockFilterIndex&)> fn)
 }
 
 bool InitBlockFilterIndex(std::function<std::unique_ptr<interfaces::Chain>()> make_chain, BlockFilterType filter_type,
-                          size_t n_cache_size, bool f_memory, bool f_wipe)
+                          size_t n_cache_size, bool f_memory, bool f_wipe, bool headers_only)
 {
     auto result = g_filter_indexes.emplace(std::piecewise_construct,
                                            std::forward_as_tuple(filter_type),
                                            std::forward_as_tuple(make_chain(), filter_type,
-                                                                 n_cache_size, f_memory, f_wipe));
+                                                                 n_cache_size, f_memory, f_wipe,
+                                                                 headers_only));
     return result.second;
 }
 
