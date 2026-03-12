@@ -87,6 +87,24 @@ public:
     /** Get a range of filter hashes between two heights on a chain. */
     bool LookupFilterHashRange(int start_height, const CBlockIndex* stop_index,
                                std::vector<uint256>& hashes_out) const;
+
+    /**
+     * Check if this index needs to download filters from peers.
+     * True when upgrading from headers-only to full: LevelDB has headers but no flat files.
+     */
+    bool NeedsFilterDownload() const;
+
+    /**
+     * Get the next height that needs a filter downloaded.
+     * Returns -1 if no more filters are needed.
+     */
+    int GetNextFilterDownloadHeight() const;
+
+    /**
+     * Store a filter downloaded from a peer, after verifying it against the stored header chain.
+     * Returns true if the filter was valid and stored successfully.
+     */
+    bool StoreDownloadedFilter(const CBlockIndex* block_index, const BlockFilter& filter);
 };
 
 /**

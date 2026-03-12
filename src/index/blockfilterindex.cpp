@@ -527,6 +527,93 @@ bool BlockFilterIndex::LookupFilterHashRange(int start_height, const CBlockIndex
     return true;
 }
 
+bool BlockFilterIndex::NeedsFilterDownload() const
+{
+    if (m_headers_only) return false;
+
+    // Check if we have a height-0 entry with a null hash (headers-only legacy entry).
+    std::pair<uint256, DBVal> read_out;
+    if (!m_db->Read(DBHeightKey(0), read_out)) {
+        return false; // No entries at all — normal fresh index, will sync from blocks.
+    }
+    return read_out.second.hash.IsNull();
+}
+
+int BlockFilterIndex::GetNextFilterDownloadHeight() const
+{
+    // Scan from height 0 to find the first entry with a null hash.
+    std::unique_ptr<CDBIterator> db_it(m_db->NewIterator());
+    DBHeightKey key(0);
+    db_it->Seek(key);
+
+    while (db_it->Valid()) {
+        if (!db_it->GetKey(key)) break;
+        // Stop if we've gone past height keys.
+        std::pair<uint256, DBVal> value;
+        if (!db_it->GetValue(value)) break;
+
+        if (value.second.hash.IsNull()) {
+            return key.height;
+        }
+        db_it->Next();
+    }
+    return -1; // All filters present.
+}
+
+bool BlockFilterIndex::StoreDownloadedFilter(const CBlockIndex* block_index, const BlockFilter& filter)
+{
+    assert(!m_headers_only);
+    assert(m_filter_fileseq);
+
+    int height = block_index->nHeight;
+    uint256 block_hash = block_index->GetBlockHash();
+
+    // Look up the stored header for this height.
+    auto stored_header = ReadFilterHeader(height, block_hash);
+    if (!stored_header) {
+        LogError("StoreDownloadedFilter: no stored header for height %d\n", height);
+        return false;
+    }
+
+    // Look up the previous header (for chaining verification).
+    uint256 prev_header{};
+    if (height > 0) {
+        const CBlockIndex* prev_index = block_index->pprev;
+        assert(prev_index);
+        auto prev = ReadFilterHeader(prev_index->nHeight, prev_index->GetBlockHash());
+        if (!prev) {
+            LogError("StoreDownloadedFilter: no stored header for height %d\n", prev_index->nHeight);
+            return false;
+        }
+        prev_header = *prev;
+    }
+
+    // Verify: SHA256d(filter_hash || prev_header) == stored_header
+    uint256 computed_header = filter.ComputeHeader(prev_header);
+    if (computed_header != *stored_header) {
+        LogError("StoreDownloadedFilter: filter header mismatch at height %d\n", height);
+        return false;
+    }
+
+    // Write filter to flat file.
+    size_t bytes_written = WriteFilterToDisk(m_next_filter_pos, filter);
+    if (bytes_written == 0) return false;
+
+    // Update LevelDB entry with hash and flat file position.
+    std::pair<uint256, DBVal> value;
+    value.first = block_hash;
+    value.second.hash = filter.GetHash();
+    value.second.header = *stored_header;
+    value.second.pos = m_next_filter_pos;
+
+    if (!m_db->Write(DBHeightKey(height), value)) {
+        return false;
+    }
+
+    m_next_filter_pos.nPos += bytes_written;
+    return true;
+}
+
 BlockFilterIndex* GetBlockFilterIndex(BlockFilterType filter_type)
 {
     auto it = g_filter_indexes.find(filter_type);

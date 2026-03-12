@@ -759,6 +759,18 @@ private:
       * on extra block-relay-only peers. */
     bool m_initial_sync_finished GUARDED_BY(cs_main){false};
 
+    /** Filter download state for upgrading headers-only blockfilterindex to full. */
+    std::atomic<bool> m_filter_download_active{false};
+    std::atomic<int> m_filter_download_next_height{0};
+    /** Peer we're currently downloading filters from (or -1). */
+    std::atomic<NodeId> m_filter_download_peer{-1};
+    /** Number of getcfilters requests in flight. */
+    std::atomic<int> m_filter_download_inflight{0};
+    static constexpr int MAX_FILTER_DOWNLOAD_BATCH = 100;
+    static constexpr int MAX_FILTER_DOWNLOAD_INFLIGHT = 1000;
+    void ProcessCFilter(CNode& pfrom, DataStream& vRecv);
+    void MaybeSendGetCFilters(CNode& pto, Peer& peer);
+
     /** Protects m_peer_map. This mutex must not be locked while holding a lock
      *  on any of the mutexes inside a Peer object. */
     mutable Mutex m_peer_mutex;
@@ -3206,6 +3218,110 @@ bool PeerManagerImpl::PrepareBlockFilterRequest(CNode& node, Peer& peer,
     return true;
 }
 
+void PeerManagerImpl::ProcessCFilter(CNode& pfrom, DataStream& vRecv)
+{
+    if (!m_filter_download_active.load()) return;
+
+    BlockFilter filter;
+    vRecv >> filter;
+
+    if (filter.GetFilterType() != BlockFilterType::BASIC) return;
+
+    BlockFilterIndex* filter_index = GetBlockFilterIndex(BlockFilterType::BASIC);
+    if (!filter_index) return;
+
+    const CBlockIndex* block_index;
+    {
+        LOCK(cs_main);
+        block_index = m_chainman.m_blockman.LookupBlockIndex(filter.GetBlockHash());
+    }
+    if (!block_index) {
+        LogDebug(BCLog::NET, "Received cfilter for unknown block %s\n", filter.GetBlockHash().ToString());
+        return;
+    }
+
+    if (!filter_index->StoreDownloadedFilter(block_index, filter)) {
+        LogPrintf("Filter download: verification failed at height %d from peer %d, disconnecting\n",
+                  block_index->nHeight, pfrom.GetId());
+        pfrom.fDisconnect = true;
+        m_filter_download_peer.store(-1);
+        m_filter_download_inflight.store(0);
+        return;
+    }
+
+    m_filter_download_inflight.fetch_sub(1);
+    LogDebug(BCLog::NET, "Stored downloaded filter at height %d\n", block_index->nHeight);
+
+    // Check if download is complete.
+    int next = filter_index->GetNextFilterDownloadHeight();
+    if (next == -1) {
+        LogPrintf("Filter download complete\n");
+        m_filter_download_active.store(false);
+        m_filter_download_peer.store(-1);
+    }
+}
+
+void PeerManagerImpl::MaybeSendGetCFilters(CNode& pto, Peer& peer)
+{
+    // Check if we need to start or continue filter download.
+    if (!m_filter_download_active.load()) {
+        // Lazy detection: check once when we see a NODE_COMPACT_FILTERS peer.
+        if (!(peer.m_their_services & NODE_COMPACT_FILTERS)) {
+            return;
+        }
+        BlockFilterIndex* filter_index = GetBlockFilterIndex(BlockFilterType::BASIC);
+        if (!filter_index || filter_index->IsHeadersOnly() || !filter_index->NeedsFilterDownload()) {
+            return;
+        }
+        m_filter_download_active.store(true);
+        m_filter_download_next_height.store(filter_index->GetNextFilterDownloadHeight());
+        LogPrintf("Filter download: starting from height %d\n", m_filter_download_next_height.load());
+    }
+
+    // Only download from peers that serve compact filters.
+    if (!(peer.m_their_services & NODE_COMPACT_FILTERS)) return;
+
+    // Use one peer at a time for simplicity.
+    NodeId expected = -1;
+    if (!m_filter_download_peer.compare_exchange_strong(expected, pto.GetId())) {
+        if (m_filter_download_peer.load() != pto.GetId()) return;
+    }
+
+    // Don't send more if we have too many in flight.
+    if (m_filter_download_inflight.load() >= MAX_FILTER_DOWNLOAD_INFLIGHT) return;
+
+    int next_height = m_filter_download_next_height.load();
+    if (next_height < 0) return;
+
+    // Get the stop block for this batch.
+    int chain_tip;
+    uint256 stop_hash;
+    {
+        LOCK(cs_main);
+        const CChain& chain = m_chainman.ActiveChain();
+        chain_tip = chain.Height();
+        if (next_height > chain_tip) return; // All requested, waiting for responses.
+        int stop_height = std::min(next_height + MAX_FILTER_DOWNLOAD_BATCH - 1, chain_tip);
+        const CBlockIndex* stop_index = chain[stop_height];
+        if (!stop_index) return;
+        stop_hash = stop_index->GetBlockHash();
+    }
+
+    int batch_end = std::min(next_height + MAX_FILTER_DOWNLOAD_BATCH - 1, chain_tip);
+    int batch_size = batch_end - next_height + 1;
+
+    MakeAndPushMessage(pto, NetMsgType::GETCFILTERS,
+                       static_cast<uint8_t>(BlockFilterType::BASIC),
+                       static_cast<uint32_t>(next_height),
+                       stop_hash);
+
+    m_filter_download_inflight.fetch_add(batch_size);
+    m_filter_download_next_height.store(batch_end + 1);
+
+    LogPrintf("Filter download: requested heights %d-%d from peer %d\n",
+              next_height, batch_end, pto.GetId());
+}
+
 void PeerManagerImpl::ProcessGetCFilters(CNode& node, Peer& peer, DataStream& vRecv)
 {
     uint8_t filter_type_ser;
@@ -4905,6 +5021,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
 
+    if (msg_type == NetMsgType::CFILTER) {
+        ProcessCFilter(pfrom, vRecv);
+        return;
+    }
+
     if (msg_type == NetMsgType::GETCFILTERS) {
         ProcessGetCFilters(pfrom, *peer, vRecv);
         return;
@@ -5961,5 +6082,9 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             MakeAndPushMessage(*pto, NetMsgType::GETDATA, vGetData);
     } // release cs_main
     MaybeSendFeefilter(*pto, *peer, current_time);
+
+    // Maybe download block filters from this peer.
+    MaybeSendGetCFilters(*pto, *peer);
+
     return true;
 }
