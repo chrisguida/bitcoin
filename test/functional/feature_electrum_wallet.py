@@ -9,7 +9,7 @@ import socket
 import time
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal, assert_greater_than
+from test_framework.util import assert_equal, assert_greater_than, electrum_port
 
 
 class ElectrumClient:
@@ -150,13 +150,12 @@ class ElectrumWalletTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         # Enable Electrum server with blockfilterindex for descriptor methods
-        # Also enable txindex and addressindex for full support
+        self.electrum_port = electrum_port(0)
         self.extra_args = [[
             "-electrum=1",
-            "-electrumport=50001",
+            f"-electrumport={self.electrum_port}",
             "-blockfilterindex=1",
             "-txindex=1",
-            "-addressindex=1"
         ]]
 
     def skip_test_if_missing_module(self):
@@ -179,7 +178,7 @@ class ElectrumWalletTest(BitcoinTestFramework):
         source = node.get_wallet_rpc("desc_source")
         descriptors = source.listdescriptors()["descriptors"]
 
-        client = ElectrumClient()
+        client = ElectrumClient(port=self.electrum_port)
         try:
             client.connect()
             client.server_version()
@@ -245,7 +244,7 @@ class ElectrumWalletTest(BitcoinTestFramework):
         # Mine blocks to get funds
         self.generatetoaddress(node, 110, funding_addr)
 
-        client = ElectrumClient()
+        client = ElectrumClient(port=self.electrum_port)
         try:
             client.connect()
             client.server_version()
@@ -296,7 +295,7 @@ class ElectrumWalletTest(BitcoinTestFramework):
         try:
             # Create 3 clients with their own wallets
             for i in range(3):
-                client = ElectrumClient()
+                client = ElectrumClient(port=self.electrum_port)
                 client.connect()
                 client.server_version(f"client_{i}")
 
@@ -355,7 +354,7 @@ class ElectrumWalletTest(BitcoinTestFramework):
         """Test error handling for various edge cases."""
         self.log.info("Testing error cases...")
 
-        client = ElectrumClient()
+        client = ElectrumClient(port=self.electrum_port)
         try:
             client.connect()
             client.server_version()

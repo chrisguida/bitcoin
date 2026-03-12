@@ -407,6 +407,10 @@ def tor_port(n):
     return p2p_port(n) + PORT_RANGE * 2
 
 
+def electrum_port(n):
+    return p2p_port(n) + PORT_RANGE * 3
+
+
 def rpc_url(datadir, i, chain, rpchost):
     rpc_u, rpc_p = get_auth_cookie(datadir, chain)
     host = '127.0.0.1'
