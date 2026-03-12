@@ -293,6 +293,8 @@ BASE_SCRIPTS = [
     'rpc_getblockfilter.py',
     'feature_blockfilter_headers_only.py',
     'feature_blockfilter_download.py',
+    'feature_electrum.py',
+    'feature_electrum_wallet.py',
     'rpc_getblockfrompeer.py',
     'rpc_invalidateblock.py',
     'feature_utxo_set_hash.py',

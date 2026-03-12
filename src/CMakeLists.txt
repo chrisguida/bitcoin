@@ -236,6 +236,8 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   flatfile.cpp
   headerssync.cpp
   httprpc.cpp
+  electrum/electrumserver.cpp
+  electrum/walletmanager.cpp
   httpserver.cpp
   i2p.cpp
   index/base.cpp
