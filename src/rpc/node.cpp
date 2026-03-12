@@ -432,6 +432,7 @@ static RPCHelpMan getindexinfo()
                             {
                                 {RPCResult::Type::BOOL, "synced", "Whether the index is synced or not"},
                                 {RPCResult::Type::NUM, "best_block_height", "The block height to which the index is synced"},
+                                {RPCResult::Type::BOOL, "headers_only", /*optional=*/true, "Whether the index only has filter headers (no full filter data). Only present for block filter indexes in headers-only mode."},
                             }
                         },
                     },
@@ -456,7 +457,19 @@ static RPCHelpMan getindexinfo()
     }
 
     ForEachBlockFilterIndex([&result, &index_name](const BlockFilterIndex& index) {
-        result.pushKVs(SummaryToJSON(index.GetSummary(), index_name));
+        IndexSummary summary = index.GetSummary();
+        if (!index_name.empty() && index_name != summary.name) return;
+
+        UniValue entry(UniValue::VOBJ);
+        entry.pushKV("synced", summary.synced);
+        entry.pushKV("best_block_height", summary.best_block_height);
+        if (index.IsHeadersOnly()) {
+            entry.pushKV("headers_only", true);
+        }
+
+        UniValue ret(UniValue::VOBJ);
+        ret.pushKV(summary.name, std::move(entry));
+        result.pushKVs(std::move(ret));
     });
 
     return result;

@@ -35,12 +35,14 @@ class BlockFilterHeadersOnlyTest(BitcoinTestFramework):
         assert "basic block filter index" in indexinfo, f"Expected basic block filter index in getindexinfo, got: {indexinfo}"
         assert_equal(indexinfo["basic block filter index"]["synced"], True)
         assert_equal(indexinfo["basic block filter index"]["best_block_height"], 50)
+        assert_equal(indexinfo["basic block filter index"]["headers_only"], True)
 
         self.log.info("Check full index is synced on node 1 (-blockfilterindex)")
         indexinfo1 = self.nodes[1].getindexinfo()
         assert "basic block filter index" in indexinfo1
         assert_equal(indexinfo1["basic block filter index"]["synced"], True)
         assert_equal(indexinfo1["basic block filter index"]["best_block_height"], 50)
+        assert "headers_only" not in indexinfo1["basic block filter index"]
 
         self.log.info("Verify getblockfilter fails on node 0 (headers-only, no filter data)")
         block_hash = self.nodes[0].getblockhash(25)
