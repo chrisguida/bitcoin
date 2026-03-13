@@ -91,7 +91,7 @@ bool ElectrumServer::Init()
     bool is_pruned = gArgs.GetIntArg("-prune", 0) > 0;
     bool has_txindex = gArgs.GetBoolArg("-txindex", DEFAULT_TXINDEX);
     bool has_addressindex = gArgs.GetBoolArg("-addressindex", false);
-    bool has_blockfilterindex = GetBlockFilterIndex(BlockFilterType::BASIC) != nullptr;
+    bool has_blockfilterindex = gArgs.GetBoolArg("-blockfilterindex", false);
 
     // Pruned nodes can only use blockfilterindex
     if (is_pruned) {
