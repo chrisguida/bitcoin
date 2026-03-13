@@ -88,45 +88,18 @@ bool ElectrumServer::Init()
 
     LogPrintf("Electrum server: initializing on %s:%d\n", m_bind_address, m_port);
 
-    bool is_pruned = gArgs.GetIntArg("-prune", 0) > 0;
-    bool has_txindex = gArgs.GetBoolArg("-txindex", DEFAULT_TXINDEX);
-    bool has_addressindex = gArgs.GetBoolArg("-addressindex", false);
     bool has_blockfilterindex = gArgs.GetBoolArg("-blockfilterindex", false);
 
-    // Pruned nodes can only use blockfilterindex
-    if (is_pruned) {
-        if (has_txindex) {
-            LogPrintf("Electrum server: ERROR - txindex not compatible with pruning\n");
-            return false;
-        }
-        if (has_addressindex) {
-            LogPrintf("Electrum server: ERROR - addressindex not compatible with pruning\n");
-            return false;
-        }
-        if (!has_blockfilterindex) {
-            LogPrintf("Electrum server: ERROR - pruned node requires -blockfilterindex=1\n");
-            return false;
-        }
-    }
-
-    // Require at least one index
-    if (!has_txindex && !has_addressindex && !has_blockfilterindex) {
-        LogPrintf("Electrum server: ERROR - requires at least one of:\n");
-        LogPrintf("Electrum server:   -txindex=1 (for blockchain.transaction.get)\n");
-        LogPrintf("Electrum server:   -addressindex=1 (for blockchain.scripthash.*)\n");
-        LogPrintf("Electrum server:   -blockfilterindex=1 (for descriptor methods)\n");
+    // Require blockfilterindex for descriptor wallet methods
+    if (!has_blockfilterindex) {
+        LogPrintf("Electrum server: ERROR - requires -blockfilterindex=1\n");
         return false;
     }
 
     // Log enabled capabilities
-    LogPrintf("Electrum server: capabilities:\n");
-    LogPrintf("Electrum server:   transaction_get: %s\n", has_txindex ? "enabled" : "disabled");
-    LogPrintf("Electrum server:   scripthash_methods: %s\n", has_addressindex ? "enabled" : "disabled");
-    LogPrintf("Electrum server:   descriptor_methods: %s\n", has_blockfilterindex ? "enabled" : "disabled");
-
-    if (has_addressindex && !has_txindex) {
-        LogPrintf("Electrum server: NOTE - scripthash methods have limited use without txindex\n");
-    }
+    bool has_txindex = gArgs.GetBoolArg("-txindex", DEFAULT_TXINDEX);
+    LogPrintf("Electrum server: descriptor_methods: enabled\n");
+    LogPrintf("Electrum server: transaction_get: %s\n", has_txindex ? "enabled (txindex)" : "disabled (no txindex)");
 
     return true;
 }
