@@ -63,22 +63,13 @@ class BlockFilterHeadersOnlyTest(BitcoinTestFramework):
         fltr_files = list(datadir.glob("fltr*.dat"))
         assert_equal(len(fltr_files), 0)
 
-        # --- State 10/11: Upgrade from headers-only to full, download from peers ---
-        self.log.info("Test state 10: restart node 0 with -blockfilterindex (upgrade)")
+        # --- State 9/10: Upgrade from headers-only to full ---
+        # Non-pruned nodes rebuild from local blocks (fast, completes immediately
+        # on regtest). Pruned nodes would download from peers.
+        self.log.info("Test state 9: restart non-pruned node 0 with -blockfilterindex (upgrade)")
         self.restart_node(0, extra_args=["-blockfilterindex"])
 
-        bfi_upgrade = self.nodes[0].getindexinfo()["basic block filter index"]
-        assert_equal(bfi_upgrade["synced"], False)
-        assert_equal(bfi_upgrade["best_block_height"], 0)
-        assert_equal(bfi_upgrade["status"], "syncing_from_peers")
-        assert "filter_headers" not in bfi_upgrade or bfi_upgrade.get("filter_headers", True)
-        self.log.info(f"  status={bfi_upgrade['status']}, best_block_height={bfi_upgrade['best_block_height']}")
-
-        # --- Connect to node 1 to download filters ---
-        self.log.info("Test state 11→12: download filters from node 1")
-        self.connect_nodes(0, 1)
-
-        # Wait for download to complete
+        # Wait for sync to complete (rebuilds from blocks, nearly instant on regtest)
         self.wait_until(
             lambda: self.nodes[0].getindexinfo()["basic block filter index"]["synced"],
             timeout=60,

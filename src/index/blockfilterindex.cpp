@@ -119,6 +119,8 @@ BlockFilterIndex::BlockFilterIndex(std::unique_ptr<interfaces::Chain> chain, Blo
 
 bool BlockFilterIndex::CustomInit(const std::optional<interfaces::BlockRef>& block)
 {
+    bool rewound = false;
+
     if (!m_headers_only) {
         if (!m_db->Read(DB_FILTER_POS, m_next_filter_pos)) {
             // Check that the cause of the read failure is that the key does not exist. Any other errors
@@ -155,11 +157,15 @@ bool BlockFilterIndex::CustomInit(const std::optional<interfaces::BlockRef>& blo
                 // Rewind the index best block so Sync() re-processes from blocks.
                 // Commit() in the sync loop will persist this.
                 SetBestBlockIndex(rewind_to);
+                rewound = true;
             }
         }
     }
 
-    if (block) {
+    // Read the last filter header from the DB for the starting block.
+    // Skip if we just rewound — m_last_header was already set correctly
+    // by the rewind code, and `block` points to the stale pre-rewind tip.
+    if (block && !rewound) {
         auto op_last_header = ReadFilterHeader(block->height, block->hash);
         if (!op_last_header) {
             LogError("Cannot read last block filter header; index may be corrupted\n");

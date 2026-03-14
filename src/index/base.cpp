@@ -117,6 +117,10 @@ bool BaseIndex::Init()
         return false;
     }
 
+    // Re-read after CustomInit, which may have rewound the index (e.g.,
+    // BlockFilterIndex rewinding from headers-only to rebuild from blocks).
+    start_block = m_best_block_index.load();
+
     // Note: this will latch to true immediately if the user starts up with an empty
     // datadir and an index enabled. If this is the case, indexation will happen solely
     // via `BlockConnected` signals until, possibly, the next restart.
