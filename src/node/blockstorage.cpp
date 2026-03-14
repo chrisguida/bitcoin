@@ -411,6 +411,16 @@ void BlockManager::FindFilesToPrune(
     uint64_t nBytesToPrune;
     int count = 0;
 
+    LogPrintf("FindFilesToPrune: currentUsage=%lluMiB target=%lluMiB buffer=%lluMiB min_block=%d last_block_can=%d MaxBlockfileNum=%d\n",
+              nCurrentUsage / 1024 / 1024, target / 1024 / 1024, nBuffer / 1024 / 1024,
+              min_block_to_prune, last_block_can_prune, this->MaxBlockfileNum());
+
+    // Log prune locks
+    for (const auto& prune_lock : m_prune_locks) {
+        LogPrintf("FindFilesToPrune: prune_lock '%s' height_first=%llu height_last=%llu\n",
+                  prune_lock.first, prune_lock.second.height_first, prune_lock.second.height_last);
+    }
+
     if (nCurrentUsage + nBuffer >= target) {
         // On a prune event, the chainstate DB is flushed.
         // To avoid excessive prune events negating the benefit of high dbcache
@@ -423,6 +433,8 @@ void BlockManager::FindFilesToPrune(
             const uint64_t remaining_blocks = target_sync_height - chain_tip_height;
             nBuffer += average_block_size * remaining_blocks;
         }
+
+        LogPrintf("FindFilesToPrune: entering prune loop, buffer after IBD adjustment=%lluMiB\n", nBuffer / 1024 / 1024);
 
         for (int fileNumber = 0; fileNumber < this->MaxBlockfileNum(); fileNumber++) {
             const auto& fileinfo = m_blockfile_info[fileNumber];
@@ -442,13 +454,17 @@ void BlockManager::FindFilesToPrune(
                 continue;
             }
 
-            if (DoPruneLocksForbidPruning(m_blockfile_info[fileNumber])) continue;
+            if (DoPruneLocksForbidPruning(m_blockfile_info[fileNumber])) {
+                if (fileNumber % 100 == 0) LogPrintf("FindFilesToPrune: file %d locked by prune lock\n", fileNumber);
+                continue;
+            }
 
             PruneOneBlockFile(fileNumber);
             // Queue up the files for removal
             setFilesToPrune.insert(fileNumber);
             nCurrentUsage -= nBytesToPrune;
             count++;
+            if (count % 100 == 0) LogPrintf("FindFilesToPrune: pruned %d files so far\n", count);
         }
     }
 

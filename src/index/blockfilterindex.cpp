@@ -302,8 +302,16 @@ bool BlockFilterIndex::Write(const BlockFilter& filter, uint32_t block_height, c
 
     if (m_headers_only) {
         // In headers-only mode, store only the filter header — no flat file write.
-        value.second.hash.SetNull();
-        value.second.pos = FlatFilePos();
+        // But preserve existing filter data if present (e.g. from a previous full run).
+        std::pair<uint256, DBVal> existing;
+        if (m_db->Read(DBHeightKey(block_height), existing) && !existing.second.hash.IsNull()) {
+            // Entry already has real filter data — keep it, just update the header.
+            value.second.hash = existing.second.hash;
+            value.second.pos = existing.second.pos;
+        } else {
+            value.second.hash.SetNull();
+            value.second.pos = FlatFilePos();
+        }
     } else {
         size_t bytes_written = WriteFilterToDisk(m_next_filter_pos, filter);
         if (bytes_written == 0) return false;

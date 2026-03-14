@@ -29,11 +29,12 @@ class BlockFilterDownloadTest(BitcoinTestFramework):
         self.generate(self.nodes[0], 200)
         self.sync_blocks()
 
-        self.log.info("Verify node 1 has headers-only index synced")
+        self.log.info("Verify node 1 has headers-only index")
         indexinfo = self.nodes[1].getindexinfo()
         assert "basic block filter index" in indexinfo
-        assert_equal(indexinfo["basic block filter index"]["synced"], True)
-        assert_equal(indexinfo["basic block filter index"]["best_block_height"], 200)
+        assert_equal(indexinfo["basic block filter index"]["synced"], False)
+        assert_equal(indexinfo["basic block filter index"]["best_block_height"], 0)
+        assert_equal(indexinfo["basic block filter index"]["status"], "idle_headers_available")
 
         self.log.info("Verify node 1 cannot serve filters (headers-only)")
         block_hash = self.nodes[1].getblockhash(100)

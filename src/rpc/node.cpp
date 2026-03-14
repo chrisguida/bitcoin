@@ -432,7 +432,9 @@ static RPCHelpMan getindexinfo()
                             {
                                 {RPCResult::Type::BOOL, "synced", "Whether the index is synced or not"},
                                 {RPCResult::Type::NUM, "best_block_height", "The block height to which the index is synced"},
-                                {RPCResult::Type::BOOL, "headers_only", /*optional=*/true, "Whether the index only has filter headers (no full filter data). Only present for block filter indexes in headers-only mode."},
+                                {RPCResult::Type::STR, "status", /*optional=*/true, "Block filter index status: idle_no_headers, idle_headers_available, syncing_from_blocks, syncing_from_peers, synced"},
+                                {RPCResult::Type::BOOL, "filter_headers", /*optional=*/true, "Whether filter headers are available (only shown when best_block_height is 0)"},
+                                {RPCResult::Type::STR, "hint", /*optional=*/true, "Action the user can take to enable filter syncing (only shown when best_block_height is 0)"},
                             }
                         },
                     },
@@ -460,11 +462,51 @@ static RPCHelpMan getindexinfo()
         IndexSummary summary = index.GetSummary();
         if (!index_name.empty() && index_name != summary.name) return;
 
+        bool is_headers_only = index.IsHeadersOnly();
+        bool has_filter_headers = summary.best_block_height > 0 || (is_headers_only && summary.synced);
+        bool is_pruned = gArgs.GetIntArg("-prune", 0) > 0;
+
+        // Determine actual filter height by finding the first null hash entry.
+        // GetNextFilterDownloadHeight returns the first height needing a filter,
+        // so filters_height = that - 1. Returns -1 if all filters present.
+        int next_needed = index.GetNextFilterDownloadHeight();
+        int filters_height = (next_needed < 0) ? summary.best_block_height : std::max(0, next_needed - 1);
+        bool needs_download = !is_headers_only && next_needed >= 0;
+
         UniValue entry(UniValue::VOBJ);
-        entry.pushKV("synced", summary.synced);
-        entry.pushKV("best_block_height", summary.best_block_height);
-        if (index.IsHeadersOnly()) {
-            entry.pushKV("headers_only", true);
+
+        // synced is only true when filters are fully at chain tip
+        bool fully_synced = !is_headers_only && !needs_download && summary.synced;
+        entry.pushKV("synced", fully_synced);
+        entry.pushKV("best_block_height", filters_height);
+
+        // Determine status
+        std::string status;
+        if (fully_synced) {
+            status = "synced";
+        } else if (is_headers_only) {
+            status = has_filter_headers ? "idle_headers_available" : "idle_no_headers";
+        } else if (needs_download) {
+            status = "syncing_from_peers";
+        } else if (!summary.synced) {
+            status = "syncing_from_blocks";
+        } else {
+            status = "synced";
+        }
+        entry.pushKV("status", status);
+
+        // filter_headers and hint only when filters_height == 0
+        if (filters_height == 0) {
+            entry.pushKV("filter_headers", has_filter_headers);
+            if (has_filter_headers) {
+                if (is_pruned) {
+                    entry.pushKV("hint", "Enable -blockfilterindex=1 to sync filters from peers");
+                } else {
+                    entry.pushKV("hint", "Enable -blockfilterindex=1 to sync filters from blocks");
+                }
+            } else {
+                entry.pushKV("hint", "Restart with -reindex=1 to build filters");
+            }
         }
 
         UniValue ret(UniValue::VOBJ);

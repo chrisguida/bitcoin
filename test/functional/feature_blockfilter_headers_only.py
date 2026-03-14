@@ -2,15 +2,10 @@
 # Copyright (c) 2026 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test unconditional block filter header chain (headers-only mode).
+"""Test block filter index getindexinfo reporting in all states.
 
-Every node builds BIP158 basic filter headers unconditionally during IBD,
-even without -blockfilterindex. This test verifies:
-1. Headers-only index syncs without -blockfilterindex
-2. Filter data (flat files) is NOT stored in headers-only mode
-3. getblockfilter fails in headers-only mode (no filter data)
-4. getindexinfo shows the index is synced
-5. Upgrading to full -blockfilterindex works
+Tests the getindexinfo RPC for the block filter index across all
+permutations: headers-only, full mode, syncing, downloading, synced.
 """
 
 from test_framework.test_framework import BitcoinTestFramework
@@ -21,53 +16,97 @@ class BlockFilterHeadersOnlyTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 2
-        # Node 0: no -blockfilterindex (headers-only mode, unconditional)
-        # Node 1: full -blockfilterindex
-        self.extra_args = [[], ["-blockfilterindex"]]
+        # Node 0: no -blockfilterindex (headers-only mode)
+        # Node 1: full -blockfilterindex + peerblockfilters (serves filters)
+        self.extra_args = [[], ["-blockfilterindex", "-peerblockfilters"]]
 
     def run_test(self):
         self.log.info("Mine blocks on both nodes")
         self.generate(self.nodes[0], 50)
         self.sync_blocks()
 
-        self.log.info("Check headers-only index is synced on node 0 (no -blockfilterindex)")
-        indexinfo = self.nodes[0].getindexinfo()
-        assert "basic block filter index" in indexinfo, f"Expected basic block filter index in getindexinfo, got: {indexinfo}"
-        assert_equal(indexinfo["basic block filter index"]["synced"], True)
-        assert_equal(indexinfo["basic block filter index"]["best_block_height"], 50)
-        assert_equal(indexinfo["basic block filter index"]["headers_only"], True)
+        # --- State 5/6: Headers-only, no bfindex ---
+        self.log.info("Test state 5/6: headers-only mode (no -blockfilterindex)")
+        bfi = self.nodes[0].getindexinfo()["basic block filter index"]
+        assert_equal(bfi["synced"], False)
+        assert_equal(bfi["best_block_height"], 0)
+        assert_equal(bfi["status"], "idle_headers_available")
+        assert_equal(bfi["filter_headers"], True)
+        assert "hint" in bfi
+        self.log.info(f"  status={bfi['status']}, hint={bfi['hint']}")
 
-        self.log.info("Check full index is synced on node 1 (-blockfilterindex)")
-        indexinfo1 = self.nodes[1].getindexinfo()
-        assert "basic block filter index" in indexinfo1
-        assert_equal(indexinfo1["basic block filter index"]["synced"], True)
-        assert_equal(indexinfo1["basic block filter index"]["best_block_height"], 50)
-        assert "headers_only" not in indexinfo1["basic block filter index"]
+        # --- State 8: Full index, synced ---
+        self.log.info("Test state 8: full index, synced")
+        bfi1 = self.nodes[1].getindexinfo()["basic block filter index"]
+        assert_equal(bfi1["synced"], True)
+        assert_equal(bfi1["best_block_height"], 50)
+        assert_equal(bfi1["status"], "synced")
+        assert "filter_headers" not in bfi1
+        assert "hint" not in bfi1
 
-        self.log.info("Verify getblockfilter fails on node 0 (headers-only, no filter data)")
+        # --- Verify getblockfilter fails on headers-only node ---
+        self.log.info("Test getblockfilter fails on headers-only node")
         block_hash = self.nodes[0].getblockhash(25)
-        assert_raises_rpc_error(-1, "Index is not enabled for filtertype basic", self.nodes[0].getblockfilter, block_hash, "basic")
+        assert_raises_rpc_error(-1, "Index is not enabled for filtertype basic",
+                                self.nodes[0].getblockfilter, block_hash, "basic")
 
-        self.log.info("Verify getblockfilter succeeds on node 1 (full index)")
+        # --- Verify getblockfilter works on full index node ---
+        self.log.info("Test getblockfilter works on full index node")
         result = self.nodes[1].getblockfilter(block_hash, "basic")
         assert "filter" in result
         assert "header" in result
         full_header = result["header"]
 
-        self.log.info("Verify no flat filter files exist on node 0")
+        # --- Verify no flat filter files on headers-only node ---
+        self.log.info("Test no flat filter files on headers-only node")
         datadir = self.nodes[0].datadir_path / "regtest" / "indexes" / "blockfilter" / "basic"
         fltr_files = list(datadir.glob("fltr*.dat"))
         assert_equal(len(fltr_files), 0)
 
-        self.log.info("Verify flat filter files exist on node 1")
-        datadir1 = self.nodes[1].datadir_path / "regtest" / "indexes" / "blockfilter" / "basic"
-        fltr_files1 = list(datadir1.glob("fltr*.dat"))
-        assert len(fltr_files1) > 0, "Expected flat filter files on full index node"
+        # --- State 10/11: Upgrade from headers-only to full, download from peers ---
+        self.log.info("Test state 10: restart node 0 with -blockfilterindex (upgrade)")
+        self.restart_node(0, extra_args=["-blockfilterindex"])
 
-        # TODO (Phase 2/3): Test upgrade from headers-only to full -blockfilterindex.
-        # Currently the index thinks it's synced (DB entries exist) but has no flat file
-        # data. The upgrade path needs to detect headers-only entries and rebuild flat
-        # files, either from blocks on disk or by downloading filters from peers.
+        bfi_upgrade = self.nodes[0].getindexinfo()["basic block filter index"]
+        assert_equal(bfi_upgrade["synced"], False)
+        assert_equal(bfi_upgrade["best_block_height"], 0)
+        assert_equal(bfi_upgrade["status"], "syncing_from_peers")
+        assert "filter_headers" not in bfi_upgrade or bfi_upgrade.get("filter_headers", True)
+        self.log.info(f"  status={bfi_upgrade['status']}, best_block_height={bfi_upgrade['best_block_height']}")
+
+        # --- Connect to node 1 to download filters ---
+        self.log.info("Test state 11→12: download filters from node 1")
+        self.connect_nodes(0, 1)
+
+        # Wait for download to complete
+        self.wait_until(
+            lambda: self.nodes[0].getindexinfo()["basic block filter index"]["synced"],
+            timeout=60,
+        )
+
+        # --- State 12: Upgrade complete ---
+        self.log.info("Test state 12: upgrade complete")
+        bfi_done = self.nodes[0].getindexinfo()["basic block filter index"]
+        assert_equal(bfi_done["synced"], True)
+        assert_equal(bfi_done["best_block_height"], 50)
+        assert_equal(bfi_done["status"], "synced")
+        assert "filter_headers" not in bfi_done
+        assert "hint" not in bfi_done
+
+        # --- Verify downloaded filter matches ---
+        self.log.info("Test downloaded filter matches node 1")
+        result0 = self.nodes[0].getblockfilter(block_hash, "basic")
+        assert_equal(result0["header"], full_header)
+
+        # --- State 6 with partial filters: restart without bfindex ---
+        self.log.info("Test state 6 with partial filters: restart headers-only after having filters")
+        self.restart_node(0, extra_args=[])
+        bfi_back = self.nodes[0].getindexinfo()["basic block filter index"]
+        assert_equal(bfi_back["synced"], False)
+        assert_equal(bfi_back["status"], "idle_headers_available")
+        # best_block_height should reflect the filters that exist
+        assert_equal(bfi_back["best_block_height"], 50)
+        self.log.info(f"  status={bfi_back['status']}, best_block_height={bfi_back['best_block_height']}")
 
         self.log.info("All tests passed")
 
