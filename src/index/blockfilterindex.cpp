@@ -134,6 +134,29 @@ bool BlockFilterIndex::CustomInit(const std::optional<interfaces::BlockRef>& blo
             m_next_filter_pos.nFile = 0;
             m_next_filter_pos.nPos = 0;
         }
+
+        // Detect upgrade from headers-only: if we have entries with null filter
+        // hashes and blocks are available locally, rewind the index so
+        // BaseIndex::Sync() rebuilds filters from blocks.
+        if (!m_chainstate->m_blockman.IsPruneMode()) {
+            int first_null = GetNextFilterDownloadHeight();
+            if (first_null >= 0) {
+                LogPrintf("BlockFilterIndex: headers-only entries at height %d, rewinding to rebuild from blocks\n", first_null);
+                const CBlockIndex* rewind_to = nullptr;
+                if (first_null > 0) {
+                    rewind_to = WITH_LOCK(cs_main, return m_chainstate->m_chain[first_null - 1]);
+                    if (rewind_to) {
+                        auto op_header = ReadFilterHeader(rewind_to->nHeight, rewind_to->GetBlockHash());
+                        if (op_header) m_last_header = *op_header;
+                    }
+                } else {
+                    m_last_header = uint256{};
+                }
+                // Rewind the index best block so Sync() re-processes from blocks.
+                // Commit() in the sync loop will persist this.
+                SetBestBlockIndex(rewind_to);
+            }
+        }
     }
 
     if (block) {
@@ -538,6 +561,10 @@ bool BlockFilterIndex::LookupFilterHashRange(int start_height, const CBlockIndex
 bool BlockFilterIndex::NeedsFilterDownload() const
 {
     if (m_headers_only) return false;
+
+    // Only download from peers if we're pruned (blocks unavailable locally).
+    // Non-pruned nodes should rebuild from blocks via normal BaseIndex sync.
+    if (!m_chainstate->m_blockman.IsPruneMode()) return false;
 
     // Check if any entry has a null hash (headers-only legacy entry needing filter data).
     return GetNextFilterDownloadHeight() >= 0;

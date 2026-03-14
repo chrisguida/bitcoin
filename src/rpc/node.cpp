@@ -471,12 +471,13 @@ static RPCHelpMan getindexinfo()
         // so filters_height = that - 1. Returns -1 if all filters present.
         int next_needed = index.GetNextFilterDownloadHeight();
         int filters_height = (next_needed < 0) ? summary.best_block_height : std::max(0, next_needed - 1);
-        bool needs_download = !is_headers_only && next_needed >= 0;
+        bool has_null_entries = !is_headers_only && next_needed >= 0;
+        bool needs_download = has_null_entries && is_pruned;
 
         UniValue entry(UniValue::VOBJ);
 
         // synced is only true when filters are fully at chain tip
-        bool fully_synced = !is_headers_only && !needs_download && summary.synced;
+        bool fully_synced = !is_headers_only && !has_null_entries && summary.synced;
         entry.pushKV("synced", fully_synced);
         entry.pushKV("best_block_height", filters_height);
 
@@ -488,7 +489,7 @@ static RPCHelpMan getindexinfo()
             status = has_filter_headers ? "idle_headers_available" : "idle_no_headers";
         } else if (needs_download) {
             status = "syncing_from_peers";
-        } else if (!summary.synced) {
+        } else if (!summary.synced || has_null_entries) {
             status = "syncing_from_blocks";
         } else {
             status = "synced";

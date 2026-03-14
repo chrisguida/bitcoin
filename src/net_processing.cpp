@@ -766,10 +766,19 @@ private:
     std::atomic<NodeId> m_filter_download_peer{-1};
     /** Number of getcfilters requests in flight. */
     std::atomic<int> m_filter_download_inflight{0};
+    /** Timestamp of last successful cfilter response. */
+    std::chrono::steady_clock::time_point m_filter_download_last_recv{};
+    /** Timestamp of last attempt to find CBF peers. */
+    std::chrono::steady_clock::time_point m_filter_download_last_peer_search{};
     static constexpr int MAX_FILTER_DOWNLOAD_BATCH = 1000;
-    static constexpr int MAX_FILTER_DOWNLOAD_INFLIGHT = 1000;
+    static constexpr int MAX_FILTER_DOWNLOAD_INFLIGHT = 1000; // one batch at a time
+    /** How long to wait before assuming the download peer is stale. */
+    static constexpr auto FILTER_DOWNLOAD_STALE_TIMEOUT = std::chrono::seconds{30};
+    /** How often to search for CBF peers if we don't have one. */
+    static constexpr auto FILTER_DOWNLOAD_PEER_SEARCH_INTERVAL = std::chrono::seconds{30};
     void ProcessCFilter(CNode& pfrom, DataStream& vRecv);
     void MaybeSendGetCFilters(CNode& pto, Peer& peer);
+    void MaybeConnectFilterPeer();
 
     /** Protects m_peer_map. This mutex must not be locked while holding a lock
      *  on any of the mutexes inside a Peer object. */
@@ -3249,8 +3258,13 @@ void PeerManagerImpl::ProcessCFilter(CNode& pfrom, DataStream& vRecv)
         return;
     }
 
-    m_filter_download_inflight.fetch_sub(1);
-    LogDebug(BCLog::NET, "Stored downloaded filter at height %d\n", block_index->nHeight);
+    int new_inflight = m_filter_download_inflight.fetch_sub(1) - 1;
+    m_filter_download_last_recv = std::chrono::steady_clock::now();
+    // Log every 100th filter and always log when inflight drops to 0
+    if (block_index->nHeight % 100 == 0 || new_inflight == 0) {
+        LogPrintf("Filter download: stored height %d from peer %d, inflight=%d\n",
+                  block_index->nHeight, pfrom.GetId(), new_inflight);
+    }
 
     // Check if download is complete.
     int next = filter_index->GetNextFilterDownloadHeight();
@@ -3261,37 +3275,102 @@ void PeerManagerImpl::ProcessCFilter(CNode& pfrom, DataStream& vRecv)
     }
 }
 
+void PeerManagerImpl::MaybeConnectFilterPeer()
+{
+    auto now = std::chrono::steady_clock::now();
+    if (now - m_filter_download_last_peer_search < FILTER_DOWNLOAD_PEER_SEARCH_INTERVAL) return;
+    m_filter_download_last_peer_search = now;
+
+    // Check if we already have a CBF peer connected.
+    bool have_cbf_peer = false;
+    {
+        LOCK(m_peer_mutex);
+        for (const auto& [id, peer] : m_peer_map) {
+            if (peer->m_their_services & NODE_COMPACT_FILTERS) {
+                have_cbf_peer = true;
+                break;
+            }
+        }
+    }
+    if (have_cbf_peer) return;
+
+    // Search addrman for peers that advertise NODE_COMPACT_FILTERS.
+    auto addresses = m_addrman.GetAddr(/*max_addresses=*/2500, /*max_pct=*/100, /*network=*/std::nullopt);
+    int cbf_found = 0;
+    for (const auto& addr : addresses) {
+        if (addr.nServices & NODE_COMPACT_FILTERS) {
+            cbf_found++;
+            // Try up to 3 CBF peers at a time
+            if (cbf_found <= 3) {
+                LogPrintf("Filter download: found CBF peer %s in addrman, connecting\n", addr.ToStringAddrPort());
+                m_connman.AddNode({addr.ToStringAddrPort(), false});
+            }
+        }
+    }
+
+    if (cbf_found == 0) {
+        LogPrintf("Filter download: no NODE_COMPACT_FILTERS peers found in addrman (%d addresses checked)\n", addresses.size());
+    } else {
+        LogPrintf("Filter download: found %d CBF peers in addrman, attempted %d connections\n", cbf_found, std::min(cbf_found, 3));
+    }
+}
+
 void PeerManagerImpl::MaybeSendGetCFilters(CNode& pto, Peer& peer)
 {
-    // Check if we need to start or continue filter download.
-    if (!m_filter_download_active.load()) {
-        // Lazy detection: check once when we see a NODE_COMPACT_FILTERS peer.
-        if (!(peer.m_their_services & NODE_COMPACT_FILTERS)) {
-            return;
-        }
-        BlockFilterIndex* filter_index = GetBlockFilterIndex(BlockFilterType::BASIC);
-        if (!filter_index || filter_index->IsHeadersOnly() || !filter_index->NeedsFilterDownload()) {
-            return;
-        }
-        m_filter_download_active.store(true);
-        m_filter_download_next_height.store(filter_index->GetNextFilterDownloadHeight());
-        LogPrintf("Filter download: starting from height %d\n", m_filter_download_next_height.load());
-    }
-
-    // Only download from peers that serve compact filters.
+    // Only consider peers that serve compact filters.
     if (!(peer.m_their_services & NODE_COMPACT_FILTERS)) return;
 
-    // Use one peer at a time for simplicity.
-    NodeId expected = -1;
-    if (!m_filter_download_peer.compare_exchange_strong(expected, pto.GetId())) {
-        if (m_filter_download_peer.load() != pto.GetId()) return;
+    if (!m_filter_download_active.load()) return;
+
+    // Detect stale download peer: if we have inflight requests and haven't
+    // received a response in FILTER_DOWNLOAD_STALE_TIMEOUT, reset and try
+    // another peer.
+    NodeId current_peer = m_filter_download_peer.load();
+    if (current_peer != -1 && m_filter_download_inflight.load() > 0) {
+        auto elapsed = std::chrono::steady_clock::now() - m_filter_download_last_recv;
+        if (elapsed > FILTER_DOWNLOAD_STALE_TIMEOUT) {
+            LogPrintf("Filter download: peer %d stale (no response for %llds), resetting\n",
+                      current_peer, std::chrono::duration_cast<std::chrono::seconds>(elapsed).count());
+            m_filter_download_peer.store(-1);
+            m_filter_download_inflight.store(0);
+            // Proactively search for a new CBF peer.
+            MaybeConnectFilterPeer();
+            // Re-scan for the actual next needed height in case some filters arrived
+            BlockFilterIndex* filter_index = GetBlockFilterIndex(BlockFilterType::BASIC);
+            if (filter_index) {
+                int next = filter_index->GetNextFilterDownloadHeight();
+                if (next < 0) {
+                    LogPrintf("Filter download complete\n");
+                    m_filter_download_active.store(false);
+                    return;
+                }
+                m_filter_download_next_height.store(next);
+            }
+        }
     }
 
-    // Don't send more if we have too many in flight.
-    if (m_filter_download_inflight.load() >= MAX_FILTER_DOWNLOAD_INFLIGHT) return;
+    // Allow multiple CBF peers to download in parallel.
+    // Track that we have at least one active peer (for stale detection).
+    NodeId prev_peer = m_filter_download_peer.load();
+    if (prev_peer == -1) {
+        m_filter_download_peer.store(pto.GetId());
+        m_filter_download_last_recv = std::chrono::steady_clock::now();
+        LogPrintf("Filter download: using peer %d (%s)\n", pto.GetId(), pto.addr.ToStringAddrPort());
+    }
+
+    // Only send one batch at a time — wait for current batch to complete
+    // before requesting more. Sending too many requests floods the peer.
+    int expected_inflight = 0;
+    if (!m_filter_download_inflight.compare_exchange_strong(expected_inflight, MAX_FILTER_DOWNLOAD_BATCH)) {
+        return; // Another batch is already in flight.
+    }
+    // We now "own" the inflight slot. If we bail out before sending, reset it.
 
     int next_height = m_filter_download_next_height.load();
-    if (next_height < 0) return;
+    if (next_height < 0) {
+        m_filter_download_inflight.store(0);
+        return;
+    }
 
     // Get the stop block for this batch.
     int chain_tip;
@@ -3300,10 +3379,16 @@ void PeerManagerImpl::MaybeSendGetCFilters(CNode& pto, Peer& peer)
         LOCK(cs_main);
         const CChain& chain = m_chainman.ActiveChain();
         chain_tip = chain.Height();
-        if (next_height > chain_tip) return; // All requested, waiting for responses.
+        if (next_height > chain_tip) {
+            m_filter_download_inflight.store(0);
+            return; // All requested, waiting for responses.
+        }
         int stop_height = std::min(next_height + MAX_FILTER_DOWNLOAD_BATCH - 1, chain_tip);
         const CBlockIndex* stop_index = chain[stop_height];
-        if (!stop_index) return;
+        if (!stop_index) {
+            m_filter_download_inflight.store(0);
+            return;
+        }
         stop_hash = stop_index->GetBlockHash();
     }
 
@@ -3315,11 +3400,12 @@ void PeerManagerImpl::MaybeSendGetCFilters(CNode& pto, Peer& peer)
                        static_cast<uint32_t>(next_height),
                        stop_hash);
 
-    m_filter_download_inflight.fetch_add(batch_size);
+    // Set actual inflight count (may differ from MAX_FILTER_DOWNLOAD_BATCH if near tip)
+    m_filter_download_inflight.store(batch_size);
     m_filter_download_next_height.store(batch_end + 1);
 
-    LogPrintf("Filter download: requested heights %d-%d from peer %d\n",
-              next_height, batch_end, pto.GetId());
+    LogPrintf("Filter download: requested heights %d-%d from peer %d (inflight=%d)\n",
+              next_height, batch_end, pto.GetId(), batch_size);
 }
 
 void PeerManagerImpl::ProcessGetCFilters(CNode& node, Peer& peer, DataStream& vRecv)
@@ -6084,6 +6170,32 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
     MaybeSendFeefilter(*pto, *peer, current_time);
 
     // Maybe download block filters from this peer.
+    // Activate download if the index needs it, regardless of current peer state.
+    if (!m_filter_download_active.load()) {
+        BlockFilterIndex* filter_index = GetBlockFilterIndex(BlockFilterType::BASIC);
+        if (filter_index && !filter_index->IsHeadersOnly() && filter_index->NeedsFilterDownload()) {
+            m_filter_download_active.store(true);
+            m_filter_download_next_height.store(filter_index->GetNextFilterDownloadHeight());
+            m_filter_download_last_recv = std::chrono::steady_clock::now();
+            LogPrintf("Filter download: starting from height %d\n", m_filter_download_next_height.load());
+        }
+    }
+    if (m_filter_download_active.load()) {
+        // Periodic status log
+        static auto last_status_log = std::chrono::steady_clock::now();
+        auto now_status = std::chrono::steady_clock::now();
+        if (now_status - last_status_log > std::chrono::seconds{30}) {
+            auto since_recv = std::chrono::duration_cast<std::chrono::seconds>(now_status - m_filter_download_last_recv).count();
+            LogPrintf("Filter download status: peer=%d next_height=%d inflight=%d since_last_recv=%llds cbf_peer=%s\n",
+                      m_filter_download_peer.load(), m_filter_download_next_height.load(),
+                      m_filter_download_inflight.load(), since_recv,
+                      (peer->m_their_services & NODE_COMPACT_FILTERS) ? "yes" : "no");
+            last_status_log = now_status;
+        }
+        if (m_filter_download_peer.load() == -1) {
+            MaybeConnectFilterPeer();
+        }
+    }
     MaybeSendGetCFilters(*pto, *peer);
 
     return true;
