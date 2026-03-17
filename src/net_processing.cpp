@@ -3311,18 +3311,24 @@ void PeerManagerImpl::ProcessCFilter(CNode& pfrom, DataStream& vRecv)
 
     // Log progress every 100 filters.
     if (height % 100 == 0) {
-        LogPrintf("Filter download: stored height %d from peer %d, write_pos=%d, buffered=%d\n",
+        LogPrintf("Filter download: height %d from peer %d, write_pos=%d, inflight=%d, buffered=%d\n",
                   height, pfrom.GetId(), m_filter_download_write_height,
-                  m_filter_download_buffer.size());
+                  peer ? peer->m_cfilter_inflight : -1, m_filter_download_buffer.size());
     }
 
-    // Check if download is complete.
-    if (m_filter_download_buffer.empty()) {
-        int next = filter_index->GetNextFilterDownloadHeight();
-        if (next == -1) {
-            LogPrintf("Filter download complete\n");
-            m_filter_download_active.store(false);
-            return;
+    // Check if download is complete — but only when write_pos reaches chain tip.
+    // GetNextFilterDownloadHeight() scans the entire LevelDB and is too expensive
+    // to call after every filter.
+    {
+        LOCK(cs_main);
+        if (m_filter_download_write_height >= m_chainman.ActiveChain().Height() &&
+            m_filter_download_buffer.empty()) {
+            int next = filter_index->GetNextFilterDownloadHeight();
+            if (next == -1) {
+                LogPrintf("Filter download complete at height %d\n", m_filter_download_write_height);
+                m_filter_download_active.store(false);
+                return;
+            }
         }
     }
 
@@ -3386,43 +3392,36 @@ void PeerManagerImpl::MaybeSendGetCFilters(CNode& pto, Peer& peer)
     if (!m_filter_download_active.load()) return;
 
     // Per-peer stale detection: if this peer has a batch in flight
-    // and hasn't responded recently, disconnect it and find a better peer.
+    // and hasn't responded recently, reset and reassign the range.
     if (peer.m_cfilter_inflight > 0) {
         auto elapsed = std::chrono::steady_clock::now() - peer.m_cfilter_last_recv;
         if (elapsed > FILTER_DOWNLOAD_STALE_TIMEOUT) {
-            LogPrintf("Filter download: peer %d stale (no response for %llds), disconnecting\n",
-                      pto.GetId(), std::chrono::duration_cast<std::chrono::seconds>(elapsed).count());
-            pto.fDisconnect = true;
-            MaybeConnectFilterPeer();
+            LogPrintf("Filter download: peer %d stale (no response for %llds, inflight=%d), resetting\n",
+                      pto.GetId(), std::chrono::duration_cast<std::chrono::seconds>(elapsed).count(),
+                      peer.m_cfilter_inflight);
+            peer.m_cfilter_inflight = 0;
+            // Reset next_height to write_pos so the gap gets re-requested
+            // by the next peer in the SendMessages loop (not this one).
+            m_filter_download_next_height.store(m_filter_download_write_height);
+            return;
+        } else {
+            // Peer has a batch in flight and isn't stale — don't send another.
             return;
         }
-        // Peer has a batch in flight and isn't stale — don't send another.
-        return;
     }
 
-    // This peer is idle — decide what range to assign.
-    int next_height;
+    // This peer is idle — assign the next sequential range.
+    int next_height = m_filter_download_next_height.load();
+    if (next_height < 0) return;
 
-    if (!m_filter_download_buffer.empty()) {
-        // Buffer has entries waiting — write_pos is blocked on a gap.
-        // Assign the gap range to this peer (redundantly if another peer
-        // already has it). First to deliver wins; duplicates are harmless.
+    // Skip past ranges already written to disk.
+    if (next_height < m_filter_download_write_height) {
         next_height = m_filter_download_write_height;
-    } else {
-        // Normal path: assign the next sequential range.
-        next_height = m_filter_download_next_height.load();
-        if (next_height < 0) return;
-
-        // Skip past ranges already written to disk.
-        if (next_height < m_filter_download_write_height) {
-            next_height = m_filter_download_write_height;
-            m_filter_download_next_height.store(next_height);
-        }
-
-        // Don't get too far ahead of the sequential write position.
-        // This caps memory usage from the out-of-order buffer.
-        if (next_height - m_filter_download_write_height > MAX_FILTER_DOWNLOAD_AHEAD) return;
+        m_filter_download_next_height.store(next_height);
     }
+
+    // Don't get too far ahead of the sequential write position.
+    if (next_height - m_filter_download_write_height > MAX_FILTER_DOWNLOAD_AHEAD) return;
 
     // Get the stop block for this batch.
     int chain_tip;
@@ -3441,11 +3440,8 @@ void PeerManagerImpl::MaybeSendGetCFilters(CNode& pto, Peer& peer)
     int batch_end = std::min(next_height + MAX_FILTER_DOWNLOAD_BATCH - 1, chain_tip);
     int batch_size = batch_end - next_height + 1;
 
-    // Only advance global next_height for non-gap (sequential) requests.
-    // Gap requests are redundant — multiple peers may request the same range.
-    if (batch_end + 1 > m_filter_download_next_height.load()) {
-        m_filter_download_next_height.store(batch_end + 1);
-    }
+    // Advance the global next height so the next peer gets a different range.
+    m_filter_download_next_height.store(batch_end + 1);
 
     MakeAndPushMessage(pto, NetMsgType::GETCFILTERS,
                        static_cast<uint8_t>(BlockFilterType::BASIC),
