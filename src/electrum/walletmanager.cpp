@@ -458,15 +458,16 @@ std::pair<std::vector<ElectrumUTXO>, std::string> ElectrumWalletManager::GetUTXO
     std::vector<ElectrumUTXO> results;
     auto coins = wallet->listCoins();
 
+    int tip_height = m_node.chain ? m_node.chain->getHeight().value_or(0) : 0;
     for (const auto& [dest, coin_list] : coins) {
         for (const auto& [outpoint, txout] : coin_list) {
-            // TODO: Check confirmations against min_confirmations
+            int depth = txout.depth_in_main_chain;
+            if (min_confirmations > 0 && depth < min_confirmations) continue;
             ElectrumUTXO utxo;
             utxo.txid = outpoint.hash.GetHex();
             utxo.vout = outpoint.n;
             utxo.value = txout.txout.nValue;
-            // TODO: Get height from txout
-            // utxo.height = ...;
+            utxo.height = (depth > 0) ? (tip_height - depth + 1) : 0;
             results.push_back(std::move(utxo));
         }
     }
