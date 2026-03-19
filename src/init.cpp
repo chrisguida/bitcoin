@@ -842,13 +842,8 @@ static bool AppInitServers(NodeContext& node)
     if (args.GetBoolArg("-rest", DEFAULT_REST_ENABLE)) StartREST(&node);
     StartHTTPServer();
 
-    // Initialize and start Electrum server
-    if (!electrum::InitElectrumServer(node)) {
-        return false;
-    }
-    if (!electrum::StartElectrumServer()) {
-        return false;
-    }
+    // Electrum server is initialized after wallet loading (Step 9) to avoid
+    // race conditions with auto-loaded wallets. See AppInitMain().
 
     return true;
 }
@@ -2078,6 +2073,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         if (!client->load()) {
             return false;
         }
+    }
+
+    // Initialize Electrum server after wallets are loaded to avoid race conditions
+    // with auto-loaded wallets from settings.json.
+    if (!electrum::InitElectrumServer(node)) {
+        return false;
+    }
+    if (!electrum::StartElectrumServer()) {
+        return false;
     }
 
     // ********************************************************* Step 10: data directory maintenance

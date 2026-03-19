@@ -1728,13 +1728,17 @@ void SubscriptionManager::NotifyWalletTransaction(const std::string& wallet_id, 
         return;
     }
 
-    // Build notification
+    // Build notification — include raw hex so clients can inspect inputs
     UniValue params(UniValue::VARR);
     params.push_back(wallet_id);
 
     UniValue tx_info(UniValue::VOBJ);
     tx_info.pushKV("txid", txid.GetHex());
     tx_info.pushKV("confirmations", confirmations);
+    auto [tx_detail, tx_err] = m_server.GetWalletManager()->GetTransaction(wallet_id, txid.GetHex());
+    if (tx_detail.has_value()) {
+        tx_info.pushKV("hex", tx_detail->raw_hex);
+    }
     params.push_back(tx_info);
 
     // Send to all subscribers

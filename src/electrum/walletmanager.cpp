@@ -147,8 +147,22 @@ WalletResult ElectrumWalletManager::OpenWallet(const std::string& wallet_id)
     }
 
     std::string internal_name = GetInternalName(wallet_id);
-    std::vector<bilingual_str> warnings;
 
+    // Check if the wallet is already loaded by the node (e.g. auto-loaded from settings.json).
+    // If so, grab an interface to the existing wallet instead of trying to load it again.
+    {
+        auto wallets = loader->getWallets();
+        for (auto& w : wallets) {
+            if (w->getWalletName() == internal_name) {
+                LogPrintf("Electrum: wallet %s already loaded by node, registering\n", wallet_id);
+                LOCK(m_wallets_mutex);
+                m_wallets[wallet_id] = std::move(w);
+                return WalletResult::Success(wallet_id);
+            }
+        }
+    }
+
+    std::vector<bilingual_str> warnings;
     auto result = loader->loadWallet(internal_name, warnings);
     if (!result) {
         return WalletResult::Error(util::ErrorString(result).original);
