@@ -55,22 +55,22 @@ class BlockFilterIndexTest(BitcoinTestFramework):
         self.sync_blocks()
 
         # ===== getindexinfo RPC states =====
-        self.log.info("Test getindexinfo: full index node reports synced")
+        self.log.info("Test getindexinfo: synced node has no hint or filter_headers")
         bfi0 = self.nodes[0].getindexinfo()["basic block filter index"]
         assert_equal(bfi0["synced"], True)
         assert_equal(bfi0["best_block_height"], 200)
         assert_equal(bfi0["status"], "synced")
-        assert "filter_headers" not in bfi0
-        assert "hint" not in bfi0
+        assert "filter_headers" not in bfi0, "synced node should not show filter_headers"
+        assert "hint" not in bfi0, "synced node should not show hint"
 
-        self.log.info("Test getindexinfo: headers-only nodes report idle")
+        self.log.info("Test getindexinfo: headers-only nodes report idle with hint")
         for n in [1, 2]:
             bfi = self.nodes[n].getindexinfo()["basic block filter index"]
             assert_equal(bfi["synced"], False)
             assert_equal(bfi["best_block_height"], 0)
             assert_equal(bfi["status"], "idle_headers_available")
             assert_equal(bfi["filter_headers"], True)
-            assert "hint" in bfi
+            assert "hint" in bfi, "idle node should show hint"
 
         self.log.info("Test getblockfilter fails on headers-only node")
         block_hash = self.nodes[1].getblockhash(100)
@@ -126,23 +126,41 @@ class BlockFilterIndexTest(BitcoinTestFramework):
         self.connect_nodes(0, 1)
         self.generate(self.nodes[0], 100, sync_fun=lambda: self.sync_blocks([self.nodes[0], self.nodes[1]]))
 
-        ref_extended = self.collect_ref(0, 0, 300)
-        extended_heights = list(range(0, 301))
+        ref_300 = self.collect_ref(0, 0, 300)
+        heights_300 = list(range(0, 301))
 
         self.restart_node(1, extra_args=["-blockfilterindex"])
         self.wait_until(
             lambda: self.nodes[1].getindexinfo()["basic block filter index"]["synced"],
             timeout=60,
         )
-        self.validate_node(1, ref_extended, extended_heights, "after more blocks")
+        self.validate_node(1, ref_300, heights_300, "after more blocks")
 
         # ===== Wipe filter index, rebuild from scratch, validate =====
+        # Mine enough blocks that rebuild takes measurable time
+        self.log.info("Mine 700 more blocks for rebuild test")
+        self.connect_nodes(0, 1)
+        self.generate(self.nodes[0], 700, sync_fun=lambda: self.sync_blocks([self.nodes[0], self.nodes[1]]))
+        ref_extended = self.collect_ref(0, 0, 1000)
+        extended_heights = list(range(0, 1001))
+
         self.log.info("Test wipe and rebuild from scratch")
         self.stop_node(1)
         filter_dir = os.path.join(str(self.nodes[1].datadir_path), "regtest", "indexes", "blockfilter")
         if os.path.exists(filter_dir):
             shutil.rmtree(filter_dir)
         self.start_node(1, extra_args=["-blockfilterindex"])
+
+        # The index is rebuilding 1000 blocks — check that getindexinfo
+        # during active sync does NOT show filter_headers or hint
+        self.log.info("Test getindexinfo during active rebuild has no hint")
+        bfi_syncing = self.nodes[1].getindexinfo()["basic block filter index"]
+        if not bfi_syncing["synced"]:
+            assert "filter_headers" not in bfi_syncing, \
+                f"filter_headers should not appear during active sync: {bfi_syncing}"
+            assert "hint" not in bfi_syncing, \
+                f"hint should not appear during active sync: {bfi_syncing}"
+
         self.wait_until(
             lambda: self.nodes[1].getindexinfo()["basic block filter index"]["synced"],
             timeout=60,
@@ -163,7 +181,7 @@ class BlockFilterIndexTest(BitcoinTestFramework):
         bfi_back = self.nodes[1].getindexinfo()["basic block filter index"]
         assert_equal(bfi_back["synced"], False)
         assert_equal(bfi_back["status"], "idle_headers_available")
-        assert_equal(bfi_back["best_block_height"], 300)
+        assert_equal(bfi_back["best_block_height"], 1000)
 
         self.restart_node(1, extra_args=["-blockfilterindex"])
         self.wait_until(

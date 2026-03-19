@@ -496,8 +496,8 @@ static RPCHelpMan getindexinfo()
         }
         entry.pushKV("status", status);
 
-        // filter_headers and hint only when filters_height == 0
-        if (filters_height == 0) {
+        // filter_headers and hint only shown for idle states (not actively syncing)
+        if (filters_height == 0 && (status == "idle_headers_available" || status == "idle_no_headers")) {
             entry.pushKV("filter_headers", has_filter_headers);
             if (has_filter_headers) {
                 if (is_pruned) {
