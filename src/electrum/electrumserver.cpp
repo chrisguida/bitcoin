@@ -1837,7 +1837,7 @@ void SubscriptionManager::NotifyWalletScanComplete(const std::string& wallet_id,
 
 bool InitElectrumServer(node::NodeContext& node)
 {
-    if (!gArgs.GetBoolArg("-electrum", false)) {
+    if (!gArgs.GetBoolArg("-electrum", false) && !gArgs.IsArgSet("-electrumport")) {
         return true;  // Not enabled
     }
 
