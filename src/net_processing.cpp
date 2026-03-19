@@ -766,6 +766,9 @@ private:
 
     /** Filter download state for upgrading headers-only blockfilterindex to full. */
     std::atomic<bool> m_filter_download_active{false};
+    /** Latched true once download completes or is not needed. Prevents repeated
+     *  NeedsFilterDownload() calls which scan the entire LevelDB. */
+    std::atomic<bool> m_filter_download_done{false};
     /** Next height range to assign to a peer. Advances as ranges are claimed. */
     std::atomic<int> m_filter_download_next_height{0};
     /** Buffered out-of-order filters waiting for sequential write to flat file. */
@@ -3327,6 +3330,7 @@ void PeerManagerImpl::ProcessCFilter(CNode& pfrom, DataStream& vRecv)
             if (next == -1) {
                 LogPrintf("Filter download complete at height %d\n", m_filter_download_write_height);
                 m_filter_download_active.store(false);
+                m_filter_download_done.store(true);
                 return;
             }
         }
@@ -6218,7 +6222,9 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
 
     // Maybe download block filters from this peer.
     // Activate download if the index needs it, regardless of current peer state.
-    if (!m_filter_download_active.load()) {
+    // Once download completes (m_filter_download_done latches true), skip the
+    // expensive NeedsFilterDownload() check which scans the entire LevelDB.
+    if (!m_filter_download_active.load() && !m_filter_download_done.load()) {
         BlockFilterIndex* filter_index = GetBlockFilterIndex(BlockFilterType::BASIC);
         if (filter_index && !filter_index->IsHeadersOnly() && filter_index->NeedsFilterDownload()) {
             int start_height = filter_index->GetNextFilterDownloadHeight();
@@ -6226,6 +6232,9 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             m_filter_download_next_height.store(start_height);
             m_filter_download_write_height = start_height;
             LogPrintf("Filter download: starting from height %d\n", start_height);
+        } else if (filter_index && !filter_index->IsHeadersOnly()) {
+            // No download needed — latch so we don't scan LevelDB again.
+            m_filter_download_done.store(true);
         }
     }
     if (m_filter_download_active.load()) {
