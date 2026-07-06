@@ -2618,6 +2618,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, Spa
     // Minimum time before next feeler connection (in microseconds).
     auto next_feeler = start + rng.rand_exp_duration(FEELER_INTERVAL);
     auto next_extra_block_relay = start + rng.rand_exp_duration(EXTRA_BLOCK_RELAY_ONLY_PEER_INTERVAL);
+    auto next_libre = start + rng.rand_exp_duration(LIBRE_RELAY_INTERVAL);
     auto next_extra_network_peer{start + rng.rand_exp_duration(EXTRA_NETWORK_PEER_INTERVAL)};
     const bool dnsseed = gArgs.GetBoolArg("-dnsseed", DEFAULT_DNSSEED);
     bool add_fixed_seeds = gArgs.GetBoolArg("-fixedseeds", DEFAULT_FIXEDSEEDS);
@@ -2807,7 +2808,13 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, Spa
             // (similar to how we deal with extra outbound peers).
             next_extra_block_relay = now + rng.rand_exp_duration(EXTRA_BLOCK_RELAY_ONLY_PEER_INTERVAL);
             conn_type = ConnectionType::BLOCK_RELAY;
-        } else if (nOutboundLibreRelay < m_max_outbound_libre_relay) {
+        } else if (nOutboundLibreRelay < m_max_outbound_libre_relay && now > next_libre) {
+            // Libre-relay peers advertise NODE_PREFERENTIAL_PEERING and are scarce
+            // in addrman, so gate attempts behind a timer (like feelers). Otherwise
+            // an unfillable slot would be selected every iteration and starve the
+            // feeler and extra-network branches below, both eclipse-resistance
+            // mechanisms.
+            next_libre = now + rng.rand_exp_duration(LIBRE_RELAY_INTERVAL);
             conn_type = ConnectionType::LIBRE_RELAY;
             libre = true;
         } else if (now > next_feeler) {

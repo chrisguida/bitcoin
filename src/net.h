@@ -60,6 +60,9 @@ static constexpr std::chrono::minutes TIMEOUT_INTERVAL{20};
 static constexpr auto FEELER_INTERVAL = 2min;
 /** Run the extra block-relay-only connection loop once every 5 minutes. **/
 static constexpr auto EXTRA_BLOCK_RELAY_ONLY_PEER_INTERVAL = 5min;
+/** Attempt to fill a libre-relay slot at most once every 2 minutes, so that a
+ *  scarcity of libre-relay peers cannot starve feeler/anti-eclipse connections. **/
+static constexpr auto LIBRE_RELAY_INTERVAL = 2min;
 /** Maximum length of incoming protocol messages (no message over 4 MB is currently acceptable). */
 static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = 4 * 1000 * 1000;
 /** Maximum length of the user agent string in `version` message */
@@ -805,9 +808,13 @@ public:
         case ConnectionType::FEELER:
         case ConnectionType::BLOCK_RELAY:
         case ConnectionType::ADDR_FETCH:
+        // A libre-relay peer is attacker-selectable (any node may advertise the
+        // bit) and is not a general full-relay peer, so it must not count toward
+        // per-network full-outbound accounting or it could strip a genuine
+        // peer's eviction protection.
+        case ConnectionType::LIBRE_RELAY:
                 return false;
         case ConnectionType::OUTBOUND_FULL_RELAY:
-        case ConnectionType::LIBRE_RELAY:
         case ConnectionType::MANUAL:
                 return true;
         } // no default case, so the compiler can warn about missing cases
@@ -840,11 +847,16 @@ public:
             case ConnectionType::INBOUND:
             case ConnectionType::MANUAL:
             case ConnectionType::FEELER:
+            // A libre-relay peer is selected for its libre-relay service bit, not
+            // for general desirable services, and (being Core-based) does not
+            // advertise NODE_REDUCED_DATA. Expecting services from it would both
+            // risk disconnecting it and count it against the reduced-data
+            // outbound cap, churning the very peers we mean to keep.
+            case ConnectionType::LIBRE_RELAY:
                 return false;
             case ConnectionType::OUTBOUND_FULL_RELAY:
             case ConnectionType::BLOCK_RELAY:
             case ConnectionType::ADDR_FETCH:
-            case ConnectionType::LIBRE_RELAY:
                 return true;
         } // no default case, so the compiler can warn about missing cases
 
@@ -1144,7 +1156,7 @@ public:
         m_max_automatic_connections = connOptions.m_max_automatic_connections;
         m_max_outbound_full_relay = std::min(MAX_OUTBOUND_FULL_RELAY_CONNECTIONS, m_max_automatic_connections);
         m_max_outbound_block_relay = std::min(MAX_BLOCK_RELAY_ONLY_CONNECTIONS, m_max_automatic_connections - m_max_outbound_full_relay);
-        m_max_outbound_libre_relay = connOptions.m_max_outbound_libre_relay;
+        m_max_outbound_libre_relay = std::min(connOptions.m_max_outbound_libre_relay, std::max(0, m_max_automatic_connections - m_max_outbound_full_relay - m_max_outbound_block_relay - m_max_feeler));
         m_max_automatic_outbound = m_max_outbound_full_relay + m_max_outbound_block_relay + m_max_feeler + m_max_outbound_libre_relay;
         m_max_inbound = std::max(0, m_max_automatic_connections - m_max_automatic_outbound);
         m_use_addrman_outgoing = connOptions.m_use_addrman_outgoing;
