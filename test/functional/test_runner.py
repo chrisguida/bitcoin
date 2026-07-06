@@ -311,6 +311,7 @@ BASE_SCRIPTS = [
     'wallet_importprunedfunds.py --descriptors',
     'p2p_leak_tx.py --v1transport',
     'p2p_leak_tx.py --v2transport',
+    'p2p_garbageman_pigeon.py',
     'p2p_eviction.py',
     'p2p_outbound_eviction.py',
     'p2p_ibd_stalling.py --v1transport',
