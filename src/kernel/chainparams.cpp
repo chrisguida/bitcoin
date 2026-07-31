@@ -642,6 +642,15 @@ public:
         consensus.nMinimumChainWork = uint256{};
         consensus.defaultAssumeValid = uint256{};
 
+        // Optionally schedule a proof-of-work algorithm change, for tests that
+        // exercise the PoW-change plumbing (see -powchangetime). Disabled by
+        // default, so regtest stays on SHA256d. Genesis predates any valid change
+        // time, so its hash is unaffected.
+        if (opts.pow_change_time) {
+            consensus.HardforkTime = *opts.pow_change_time;
+            consensus.PowChangeAlgo = opts.pow_change_algo;
+        }
+
         pchMessageStart[0] = 0xfa;
         pchMessageStart[1] = 0xbf;
         pchMessageStart[2] = 0xb5;

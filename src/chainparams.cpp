@@ -56,6 +56,22 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
     if (auto value = args.GetBoolArg("-fastprune")) options.fastprune = *value;
     if (HasTestOption(args, "bip94")) options.enforce_bip94 = true;
 
+    if (const auto arg{args.GetArg("-powchangetime", "")}; !arg.empty()) {
+        const std::vector<std::string> parts{SplitString(arg, ':')};
+        int64_t change_time;
+        if (!ParseInt64(parts[0], &change_time)) {
+            throw std::runtime_error(strprintf("Invalid time (%s) for -powchangetime=time[:algo].", arg));
+        }
+        options.pow_change_time = change_time;
+        if (parts.size() >= 2) {
+            int32_t algo;
+            if (!ParseInt32(parts[1], &algo) || algo < 0 || algo > static_cast<int32_t>(HashAlgorithm::NUM_HASH_ALGOS)) {
+                throw std::runtime_error(strprintf("Invalid algo (%s) for -powchangetime=time[:algo].", arg));
+            }
+            options.pow_change_algo = static_cast<HashAlgorithm>(algo);
+        }
+    }
+
     for (const std::string& arg : args.GetArgs("-testactivationheight")) {
         const auto found{arg.find('@')};
         if (found == std::string::npos) {
