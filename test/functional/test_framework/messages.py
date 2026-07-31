@@ -28,6 +28,7 @@ import socket
 import time
 import unittest
 
+from test_framework.crypto.ripemd160 import ripemd160 as _ripemd160_pure
 from test_framework.crypto.siphash import siphash256
 from test_framework.util import assert_equal
 
@@ -97,6 +98,60 @@ def sha3(s):
 
 def hash256(s):
     return sha256(sha256(s))
+
+
+# Prefer OpenSSL's RIPEMD-160 (fast) for the rotating regtest PoW, since it is
+# hashed once per block; fall back to the pure-Python implementation when the
+# OpenSSL legacy provider is unavailable.
+try:
+    hashlib.new("ripemd160")
+    def ripemd160(s):
+        return hashlib.new("ripemd160", s).digest()
+except ValueError:
+    ripemd160 = _ripemd160_pure
+
+
+def hash160(s):
+    return ripemd160(sha256(s))
+
+
+def _upgrade_160_hash_to_256(algo):
+    # The 160-bit PoW algorithms right-pad their 20-byte digest to 32 bytes with
+    # zeroes, matching the C++ side (a zero-initialised uint256 with 20 bytes written).
+    def wrapper(s):
+        return algo(s) + (b"\x00" * 12)
+    return wrapper
+
+
+# Indexed to match the C++ HashAlgorithm enum:
+#   0 = SHA256, 1 = SHA256d, 2 = RIPEMD160, 3 = HASH160
+POW_ALGOS = (sha256, hash256, _upgrade_160_hash_to_256(ripemd160), _upgrade_160_hash_to_256(hash160))
+# NUM_HASH_ALGOS as the selected algorithm means "rotate hourly", matching C++.
+NUM_HASH_ALGOS = len(POW_ALGOS)
+
+# PoW-change schedule mirrored from the node so block hashes match. Inert by
+# default (every block is SHA256d), matching a default regtest node. A test that
+# starts a node with -powchangetime must mirror it here via set_pow_change().
+_pow_change_time = None
+_pow_change_algo = NUM_HASH_ALGOS
+
+
+def set_pow_change(change_time, algo=NUM_HASH_ALGOS):
+    """Mirror a node's -powchangetime=time[:algo] configuration so that powhash()
+    selects the same algorithm the node's PowAlgorithmForTime() does."""
+    global _pow_change_time, _pow_change_algo
+    _pow_change_time = change_time
+    _pow_change_algo = algo
+
+
+def powhash(s, n_time):
+    """Proof-of-work hash of a serialized 80-byte header, selecting the algorithm
+    the way Consensus::Params::PowAlgorithmForTime() does."""
+    if _pow_change_time is None or n_time < _pow_change_time:
+        return hash256(s)
+    if _pow_change_algo == NUM_HASH_ALGOS:
+        return POW_ALGOS[int(n_time / 3600) % NUM_HASH_ALGOS](s)
+    return POW_ALGOS[_pow_change_algo](s)
 
 
 def ser_compact_size(l):
@@ -748,8 +803,9 @@ class CBlockHeader:
             r += self.nTime.to_bytes(4, "little")
             r += self.nBits.to_bytes(4, "little")
             r += self.nNonce.to_bytes(4, "little")
-            self.sha256 = uint256_from_str(hash256(r))
-            self.hash = hash256(r)[::-1].hex()
+            rawhash = powhash(r, self.nTime)
+            self.sha256 = uint256_from_str(rawhash)
+            self.hash = rawhash[::-1].hex()
 
     def rehash(self):
         self.sha256 = None
