@@ -72,6 +72,36 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         }
     }
 
+    if (const auto arg{args.GetArg("-rdtsexpiry", "")}; !arg.empty()) {
+        // The RDTS activation time is -powchangetime: one fork instant, as on
+        // mainnet. Only the end of the flag day is schedulable here; a separate
+        // activation time would let tests schedule the two apart, which no
+        // real network can do.
+        if (!options.pow_change_time) {
+            throw std::runtime_error("-rdtsexpiry requires -powchangetime (RDTS activates at the PoW change).");
+        }
+        int64_t expiry;
+        if (!ParseInt64(arg, &expiry) || expiry <= *options.pow_change_time) {
+            throw std::runtime_error(strprintf("Invalid expiry (%s) for -rdtsexpiry: must parse and exceed -powchangetime.", arg));
+        }
+        options.rdts_expiry_time = expiry;
+    }
+
+    if (const auto arg{args.GetArg("-rdtssignalwindow", "")}; !arg.empty()) {
+        // The window's early cutoff compares block times against -powchangetime,
+        // so a window without a scheduled fork is meaningless.
+        if (!options.pow_change_time) {
+            throw std::runtime_error("-rdtssignalwindow requires -powchangetime (the fork ends the signalling requirement).");
+        }
+        const std::vector<std::string> parts{SplitString(arg, ':')};
+        int32_t begin, end;
+        if (parts.size() != 2 || !ParseInt32(parts[0], &begin) || !ParseInt32(parts[1], &end) || begin < 0 || end < begin) {
+            throw std::runtime_error(strprintf("Invalid signalling window (%s) for -rdtssignalwindow=<begin>:<end>.", arg));
+        }
+        options.rdts_must_signal_begin = begin;
+        options.rdts_must_signal_end = end;
+    }
+
     for (const std::string& arg : args.GetArgs("-testactivationheight")) {
         const auto found{arg.find('@')};
         if (found == std::string::npos) {

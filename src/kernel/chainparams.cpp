@@ -673,6 +673,16 @@ public:
             consensus.PowChangeAlgo = opts.pow_change_algo;
         }
 
+        // Optionally schedule the RDTS flag day relative to the PoW change
+        // (see -rdtsexpiry) and/or the mandatory-signalling window (see
+        // -rdtssignalwindow). Both left unscheduled by default, so RDTS stays
+        // inactive on regtest regardless of -powchangetime.
+        if (opts.rdts_expiry_time) {
+            consensus.RdtsExpiryTime = *opts.rdts_expiry_time;
+        }
+        consensus.RdtsMustSignalBegin = opts.rdts_must_signal_begin;
+        consensus.RdtsMustSignalEnd = opts.rdts_must_signal_end;
+
         pchMessageStart[0] = 0xfa;
         pchMessageStart[1] = 0xbf;
         pchMessageStart[2] = 0xb5;

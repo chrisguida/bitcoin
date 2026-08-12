@@ -182,6 +182,15 @@ public:
         //! algorithm; HashAlgorithm::NUM_HASH_ALGOS means rotate hourly.
         std::optional<int64_t> pow_change_time{};
         HashAlgorithm pow_change_algo{HashAlgorithm::NUM_HASH_ALGOS};
+        //! If set, RDTS rules apply to blocks with nTime in
+        //! [pow_change_time, rdts_expiry_time) (see -rdtsexpiry). Requires
+        //! pow_change_time to be set.
+        std::optional<int64_t> rdts_expiry_time{};
+        //! Blocks in the [begin, end) height window whose nTime precedes
+        //! pow_change_time must signal the RDTS versionbit (see
+        //! -rdtssignalwindow). Independent of rdts_expiry_time.
+        int rdts_must_signal_begin{0};
+        int rdts_must_signal_end{0};
     };
 
     static std::unique_ptr<const CChainParams> RegTest(const RegTestOptions& options);
