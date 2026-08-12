@@ -132,12 +132,34 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].active_duration = 52416; // ~1 year
         consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].threshold = 1109; // 55% of 2016
 
+        // RDTS flag day: at the PoW-change hardfork, RDTS rules apply to every
+        // block with nTime in [HardforkTime, RdtsExpiryTime), replacing the
+        // versionbits activation above (which the stall at 961633 prevented
+        // from ever reaching ACTIVE). The mandatory-signalling window restates
+        // the [max_activation_height - 2P, max_activation_height - P) rule for
+        // pre-fork blocks byte-for-byte; it is cut off early by the fork itself
+        // (blocks with nTime >= HardforkTime need not signal).
+        // NOTE: PowChangeAlgo is deliberately not set here; until the new
+        // algorithm is chosen, PowAlgorithmForTime() returns SHA256d on both
+        // sides of HardforkTime and the PoW side of the hardfork stays inert.
+        consensus.HardforkTime = 1788220800; // September 1st, 2026 00:00 UTC
+        consensus.RdtsExpiryTime = 1851379200; // September 1st, 2028 00:00 UTC
+        consensus.RdtsMustSignalBegin = 961632; // == max_activation_height - 2 * 2016
+        consensus.RdtsMustSignalEnd = 963648;   // == max_activation_height - 2016
+
         if (g_rdts_consent == RDTSConsentFlag::UNSUPPORTED_UNSAFE_NO_ENFORCEMENT && !g_enable_rdts) {
             consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
             consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
             consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].max_activation_height = std::numeric_limits<int>::max();
             consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].active_duration = std::numeric_limits<int>::max();
             consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].threshold = 0;
+            // Non-consenting nodes enforce neither the RDTS rules nor the
+            // signalling window (matching the versionbits-era fields above).
+            // HardforkTime is NOT cleared: the PoW change applies regardless
+            // of RDTS consent, or the node leaves the network at the fork.
+            consensus.RdtsExpiryTime = std::numeric_limits<int64_t>::min();
+            consensus.RdtsMustSignalBegin = 0;
+            consensus.RdtsMustSignalEnd = 0;
         }
 
         consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000dee8e2a309ad8a9820433c68"};
