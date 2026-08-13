@@ -287,6 +287,20 @@ int32_t VersionBitsCache::ComputeBlockVersion(const CBlockIndex* pindexPrev, con
         }
     }
 
+    // RDTS mandatory signalling (hardcoded window, not versionbits): blocks we
+    // mine inside the window must set the bit or every enforcing node rejects
+    // them. Signal on height ALONE: the block's eventual nTime is unknowable
+    // here, and deciding by any timestamp (e.g. the parent's) diverges from
+    // consensus when a parent is stamped ahead of the clock across the fork
+    // boundary, making every node's own template invalid (a network-wide
+    // mining halt of up to 2h). Post-fork blocks in the window signal
+    // unnecessarily, which is always valid. This is also what keeps the
+    // unknown-versionbits warning quiet: the warning fires for signalled bits
+    // this function does not expect.
+    if (pindexPrev != nullptr && params.RdtsInSignalWindow(pindexPrev->nHeight + 1)) {
+        nVersion |= (int32_t{1} << Consensus::RDTS_SIGNAL_BIT);
+    }
+
     return nVersion;
 }
 

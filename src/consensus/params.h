@@ -36,6 +36,12 @@ enum DeploymentPos : uint16_t {
     // NOTE: Also add new deployments to VersionBitsDeploymentInfo in deploymentinfo.cpp
     MAX_VERSION_BITS_DEPLOYMENTS
 };
+
+/** The versionbit (BIP110) that pre-fork blocks in the RDTS mandatory-signalling
+ *  window must set. Hardcoded: RDTS no longer activates via versionbits, but the
+ *  pre-fork signalling requirement is a consensus rule that must be preserved
+ *  byte-for-byte (it is what invalidates the non-signalling majority chain). */
+static constexpr int RDTS_SIGNAL_BIT{4};
 constexpr bool ValidDeployment(DeploymentPos dep) { return dep < MAX_VERSION_BITS_DEPLOYMENTS; }
 
 /**
@@ -169,6 +175,22 @@ struct Params {
     /** Whether the RDTS flag-day rules apply to a block with this timestamp. */
     bool RdtsActiveAtTime(int64_t nTime) const {
         return nTime >= HardforkTime && nTime < RdtsExpiryTime;
+    }
+    /** Whether a block at this height with this timestamp must signal the
+     *  RDTS versionbit. Pre-fork blocks in the window must signal; the fork
+     *  itself ends the requirement (a post-fork block is exempt even inside
+     *  the height window). */
+    bool RdtsMustSignalAt(int height, int64_t nTime) const {
+        return RdtsInSignalWindow(height) && nTime < HardforkTime;
+    }
+    /** Whether a block at this height is inside the signalling window,
+     *  regardless of timestamp. Block CONSTRUCTION signals on this alone:
+     *  the block's eventual nTime is not knowable at template time (miners
+     *  may stamp up to 2h ahead, so a post-fork-stamped parent does not imply
+     *  a post-fork child), and over-signalling is always valid. Consensus
+     *  (RdtsMustSignalAt) additionally exempts post-fork-stamped blocks. */
+    bool RdtsInSignalWindow(int height) const {
+        return height >= RdtsMustSignalBegin && height < RdtsMustSignalEnd;
     }
 
     /**

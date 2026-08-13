@@ -10,10 +10,9 @@ history, so the enforcing node corrects it: every offending block in the index
 (active chain or side branch) is marked invalid and the node reorganizes to the
 best valid chain, mirroring BIP148.
 
-A mandatory-signaling deadline is set via -vbparams so a window exists on
-regtest:
-    max_activation_height = 576, nMinerConfirmationWindow = 144
-    => mandatory-signaling window = [288, 431]
+The mandatory-signaling window is set via -rdtssignalwindow (heights [288, 432)
+on regtest here). Blocks in the window whose nTime precedes the fork time
+(-hardforktime) must signal; the fork itself ends the requirement.
 
 Cases:
   A_ACTIVE     inherited non-signaling block on the ACTIVE chain -> auto-reorg to
@@ -23,9 +22,10 @@ Cases:
                at startup while the (valid) active chain is left untouched.
   A_CLEAN      a fully-signaling chain -> untouched (no false-positive destruction).
   A_BOUNDARY   non-signaling only just OUTSIDE the window (287, 432) -> untouched.
-  A_STARTED    locked-in exempt non-signaling in-window blocks -> untouched.
+  A_POSTFORK   the fork lands INSIDE the window: post-fork in-window blocks are
+               signaling-exempt and untouched.
 """
-from test_framework.blocktools import create_block, create_coinbase, add_witness_commitment
+from test_framework.blocktools import TIME_GENESIS_BLOCK, create_block, create_coinbase, add_witness_commitment
 from test_framework.script import CScript, OP_RETURN, OP_NOP
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.test_node import ErrorMatch
@@ -33,17 +33,26 @@ from test_framework.util import assert_equal
 
 VERSIONBITS_TOP_BITS = 0x20000000
 REDUCED_DATA_BIT = 4
-# start=0, timeout=NO_TIMEOUT, min_act=0, max_act=576, active_duration=1440000, threshold=108
-VB_ENFORCE = '-vbparams=reduced_data:0:9223372036854775807:0:576:1440000:108'
-WINDOW_START = 288  # 576 - 2*144
-WINDOW_END = 431    # 576 - 144 - 1
+# Fork far in the future: every block in these chains is pre-fork, so the
+# window applies by height alone. Block times here are genesis + height
+# (each block is parent time + 1).
+FAR_FORK = 9_000_000_000
+RDTS_ENFORCE = [f'-hardforktime={FAR_FORK}', '-rdtssignalwindow=288:432']
+WINDOW_START = 288
+WINDOW_END = 431    # last in-window height (the option's end bound is exclusive)
 CHAIN_TIP = 440
 
+# A_POSTFORK: fork time inside the window. Block h has nTime genesis + h, so
+# heights 288..299 are pre-fork (must signal) and 300..431 post-fork (exempt).
+POSTFORK_CROSS_HEIGHT = 300
+RDTS_POSTFORK = [f'-hardforktime={TIME_GENESIS_BLOCK + POSTFORK_CROSS_HEIGHT}',
+                 '-rdtssignalwindow=288:432']
+
 # The pruned case needs the violator >= MIN_BLOCKS_TO_KEEP (288) below the tip.
-# A lower deadline (max_act=432 => window [144, 288)) keeps that chain as short
-# as possible while staying clear of genesis.
-VB_PRUNE = '-vbparams=reduced_data:0:9223372036854775807:0:432:1440000:108'
-PRUNE_VIOLATOR = 144   # 432 - 2*144
+# A lower window ([144, 288)) keeps that chain as short as possible while
+# staying clear of genesis.
+RDTS_PRUNE = [f'-hardforktime={FAR_FORK}', '-rdtssignalwindow=144:288']
+PRUNE_VIOLATOR = 144
 PRUNE_TIP = 432        # violator + MIN_BLOCKS_TO_KEEP
 # A ~64kiB coinbase so each block fills a -fastprune block file (64kiB), making
 # the violator's file independently prunable.
@@ -55,9 +64,10 @@ class RdtsMigrationTest(BitcoinTestFramework):
         self.num_nodes = 8
         self.setup_clean_chain = True
         # node0 clean-enforcing; node1/2/3 non-enforcing builders; node4 enforcing
-        # (STARTED-gate oracle); node5 non-enforcing (multi-branch); node6 pruned;
-        # node7 non-enforcing builder for the -reindex-chainstate recovery path.
-        self.extra_args = [[VB_ENFORCE], [], [], [], [VB_ENFORCE], [], ['-prune=1', '-fastprune'], []]
+        # with the fork inside the window (time-clause oracle); node5 non-enforcing
+        # (multi-branch); node6 pruned; node7 non-enforcing builder for the
+        # -reindex-chainstate recovery path.
+        self.extra_args = [RDTS_ENFORCE, [], [], [], RDTS_POSTFORK, [], ['-prune=1', '-fastprune'], []]
 
     def setup_network(self):
         self.setup_nodes()  # driven directly, no connections
@@ -122,7 +132,7 @@ class RdtsMigrationTest(BitcoinTestFramework):
         self.mine_to(n_clean, WINDOW_END, signal=True)
         self.mine_to(n_clean, CHAIN_TIP, signal=False)
         tip_before = n_clean.getbestblockhash()
-        n_clean = self.restart(0, [VB_ENFORCE])
+        n_clean = self.restart(0, RDTS_ENFORCE)
         assert_equal(n_clean.getbestblockhash(), tip_before)
         assert_equal(n_clean.getblockcount(), CHAIN_TIP)
         self.log.info("  A_CLEAN CONFIRMED: valid chain not disturbed")
@@ -143,7 +153,7 @@ class RdtsMigrationTest(BitcoinTestFramework):
         side_bad = self.make_block(n_active, s287.hash, s287.nTime, WINDOW_START, signal=False)
         assert n_active.submitblock(side_bad.serialize().hex()) in (None, "inconclusive")
         assert_equal(n_active.getbestblockhash(), old_tip)                 # still on the active (invalid) tip
-        n_active = self.restart(1, [VB_ENFORCE])          # enforcing, no manual command
+        n_active = self.restart(1, RDTS_ENFORCE)          # enforcing, no manual command
         assert_equal(n_active.getblockcount(), WINDOW_START - 1)
         assert_equal(n_active.getbestblockhash(), n_active.getblockhash(WINDOW_START - 1))
         assert_equal(self.chaintip_status(n_active, old_tip), 'invalid')   # active branch invalidated
@@ -152,7 +162,7 @@ class RdtsMigrationTest(BitcoinTestFramework):
         self.log.info(f"  auto-reorged to height {n_active.getblockcount()}; active and non-active "
                       f"violators both invalidated in one pass")
         # persists across another restart
-        n_active = self.restart(1, [VB_ENFORCE])
+        n_active = self.restart(1, RDTS_ENFORCE)
         assert_equal(n_active.getblockcount(), WINDOW_START - 1)
         assert_equal(self.chaintip_status(n_active, old_tip), 'invalid')
         self.log.info("  A_ACTIVE CONFIRMED: correction persists across restart (idempotent)")
@@ -180,7 +190,7 @@ class RdtsMigrationTest(BitcoinTestFramework):
         assert n_nonactive.submitblock(side_bad.serialize().hex()) in (None, "inconclusive")  # height WINDOW_START, non-active
         assert_equal(n_nonactive.getbestblockhash(), main_tip)  # still on main
         assert_equal(self.chaintip_status(n_nonactive, side_bad.hash), 'valid-headers')
-        n_nonactive = self.restart(2, [VB_ENFORCE])
+        n_nonactive = self.restart(2, RDTS_ENFORCE)
         assert_equal(n_nonactive.getbestblockhash(), main_tip)                    # main untouched
         assert_equal(n_nonactive.getblockcount(), CHAIN_TIP)
         assert_equal(self.chaintip_status(n_nonactive, side_bad.hash), 'invalid') # side branch corrected
@@ -194,33 +204,42 @@ class RdtsMigrationTest(BitcoinTestFramework):
         self.submit_tip(n_bound, signal=False)             # 432 outside
         self.mine_to(n_bound, CHAIN_TIP, signal=False)
         bound_tip = n_bound.getbestblockhash()
-        n_bound = self.restart(3, [VB_ENFORCE])
+        n_bound = self.restart(3, RDTS_ENFORCE)
         assert_equal(n_bound.getbestblockhash(), bound_tip)
         assert_equal(n_bound.getblockcount(), CHAIN_TIP)
         self.log.info("  A_BOUNDARY CONFIRMED: out-of-window blocks not corrected")
 
-        # A_STARTED: lock in before the window, then stop signaling. Blocks that
-        # are non-signaling but consensus-legal (exempt) must be untouched. Built
+        # A_POSTFORK: the fork time lands inside the window (block times are
+        # genesis + height, and node4's -hardforktime crosses at height 300).
+        # Pre-fork in-window blocks (288..299) must signal; post-fork in-window
+        # blocks (300..431) are exempt via RdtsMustSignalAt's time clause. Built
         # on an ENFORCING node, so its acceptance defines what is legal.
-        self.log.info("A_STARTED: locked-in exempt non-signaling blocks are untouched")
-        self.mine_to(n_lockin, WINDOW_START - 1 - 144, signal=False)  # ..143
-        self.mine_to(n_lockin, WINDOW_START - 1, signal=True)         # 144..287 signal -> lock in
+        self.log.info("A_POSTFORK: post-fork in-window blocks are signaling-exempt and untouched")
+        self.mine_to(n_lockin, WINDOW_START - 1, signal=False)                 # ..287
+        self.mine_to(n_lockin, POSTFORK_CROSS_HEIGHT - 2, signal=True)         # 288..298 must signal
+        # A non-signaling block at the LAST pre-fork in-window height (299,
+        # nTime genesis+299 < fork) is still invalid.
+        tip = n_lockin.getbestblockhash()
+        pre_fork_bad = self.make_block(n_lockin, tip, n_lockin.getblockheader(tip)['time'],
+                                       n_lockin.getblockcount() + 1, signal=False)
+        assert n_lockin.submitblock(pre_fork_bad.serialize().hex()) is not None
+        self.submit_tip(n_lockin, signal=True)                                 # 299, signalling, valid
         exempt = 0
         while n_lockin.getblockcount() < WINDOW_END:
             tip = n_lockin.getbestblockhash()
             blk = self.make_block(n_lockin, tip, n_lockin.getblockheader(tip)['time'],
                                   n_lockin.getblockcount() + 1, signal=False)
             if n_lockin.submitblock(blk.serialize().hex()) is None:
-                exempt += 1                              # accepted while non-signaling => legal/exempt
+                exempt += 1                              # accepted while non-signaling => post-fork exempt
             else:
-                self.submit_tip(n_lockin, signal=True)   # still must-signal at this height
-        assert exempt > 0, "expected some in-window blocks to be signaling-exempt after lock-in"
+                self.submit_tip(n_lockin, signal=True)   # still pre-fork at this height
+        assert exempt > 0, "expected post-fork in-window blocks to be signaling-exempt"
         self.mine_to(n_lockin, CHAIN_TIP, signal=False)
         lockin_tip = n_lockin.getbestblockhash()
-        n_lockin = self.restart(4, [VB_ENFORCE])
+        n_lockin = self.restart(4, RDTS_POSTFORK)
         assert_equal(n_lockin.getbestblockhash(), lockin_tip)
         assert_equal(n_lockin.getblockcount(), CHAIN_TIP)
-        self.log.info(f"  A_STARTED CONFIRMED: {exempt} exempt non-signaling blocks left intact")
+        self.log.info(f"  A_POSTFORK CONFIRMED: {exempt} exempt post-fork non-signaling blocks left intact")
 
         # A_MULTI: two independent non-active violating branches on one node must
         # BOTH be invalidated -- this exercises the multi-pass correction loop.
@@ -246,7 +265,7 @@ class RdtsMigrationTest(BitcoinTestFramework):
         b288 = self.make_block(n_multi, b287.hash, b287.nTime, WINDOW_START, signal=False)
         assert n_multi.submitblock(b288.serialize().hex()) in (None, "inconclusive")
         assert_equal(n_multi.getbestblockhash(), main_tip2)
-        n_multi = self.restart(5, [VB_ENFORCE])
+        n_multi = self.restart(5, RDTS_ENFORCE)
         assert_equal(n_multi.getbestblockhash(), main_tip2)                     # valid main kept
         assert_equal(self.chaintip_status(n_multi, a288.hash), 'invalid')       # branch A corrected
         assert_equal(self.chaintip_status(n_multi, b288.hash), 'invalid')       # branch B corrected
@@ -267,15 +286,15 @@ class RdtsMigrationTest(BitcoinTestFramework):
         # A daemon can't answer the "rebuild now?" prompt, so it declines and fails
         # closed with the recovery message rather than partially rewinding.
         self.nodes[6].assert_start_raises_init_error(
-            extra_args=['-prune=1', '-fastprune', VB_PRUNE],
+            extra_args=['-prune=1', '-fastprune'] + RDTS_PRUNE,
             expected_msg="A block that violates the BIP110/RDTS mandatory-signaling rule",
             match=ErrorMatch.PARTIAL_REGEX)
         # When the prompt is approved (here via the test option), the node takes the
         # reindex path instead of aborting. (A full re-sync of the pruned data needs
         # peers; offline we only confirm the reindex path is taken and the node no
         # longer holds the violator.)
-        self.start_node(6, extra_args=['-prune=1', '-fastprune', VB_PRUNE,
-                                       '-test=reindex_after_failure_noninteractive_yes'])
+        self.start_node(6, extra_args=['-prune=1', '-fastprune'] + RDTS_PRUNE +
+                                      ['-test=reindex_after_failure_noninteractive_yes'])
         assert self.nodes[6].getblockcount() < PRUNE_TIP  # rebuilt, no longer on the invalid tip
         self.stop_node(6)
         self.log.info("  A_PRUNED CONFIRMED: prompts to rebuild; declined -> fail closed, approved -> reindex")
@@ -290,7 +309,7 @@ class RdtsMigrationTest(BitcoinTestFramework):
         bad_rc = self.build_bad_active_chain(n_rc)         # violator at WINDOW_START, tip at CHAIN_TIP
         rc_bad_tip = n_rc.getbestblockhash()
         assert_equal(n_rc.getblockcount(), CHAIN_TIP)
-        n_rc = self.restart(7, [VB_ENFORCE, '-reindex-chainstate'])
+        n_rc = self.restart(7, RDTS_ENFORCE + ['-reindex-chainstate'])
         assert_equal(n_rc.getblockcount(), WINDOW_START - 1)                    # reorged to last valid ancestor
         assert_equal(n_rc.getbestblockhash(), n_rc.getblockhash(WINDOW_START - 1))
         assert_equal(self.chaintip_status(n_rc, rc_bad_tip), 'invalid')         # violating branch invalidated
