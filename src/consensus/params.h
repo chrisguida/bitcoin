@@ -138,6 +138,40 @@ struct Params {
     uint256 defaultAssumeValid;
 
     /**
+     * Time of the PoW-change hardfork. RDTS activates at this same instant
+     * (one flag day; see RdtsActiveAtTime). Defaults leave the hardfork
+     * unscheduled (HardforkTime == max), so behaviour is unchanged.
+     * NOTE: this field is introduced independently by the powchange branch
+     * and by the sighash hardfork branch; the declaration must stay identical
+     * across them for clean assembly.
+     */
+    int64_t HardforkTime{std::numeric_limits<int64_t>::max()};
+
+    /**
+     * RDTS (BIP110 ReducedData Temporary Softfork) flag-day parameters.
+     *
+     * At the PoW-change hardfork RDTS stops using versionbits: its rules are
+     * enforced for exactly the blocks whose own nTime lies in
+     * [HardforkTime, RdtsExpiryTime). The defaults leave this unscheduled
+     * (the interval is empty for every nTime), so behaviour is unchanged on
+     * chains that do not set it.
+     *
+     * The mandatory-signalling window [RdtsMustSignalBegin, RdtsMustSignalEnd)
+     * restates the versionbits-era requirement for pre-fork blocks: within it,
+     * every block whose nTime precedes HardforkTime must signal the RDTS
+     * versionbit. These rejections are what invalidate the non-signalling
+     * majority chain below the fork, so the window must never be relaxed once
+     * shipped. The default (begin == end) disables the window.
+     */
+    int64_t RdtsExpiryTime{std::numeric_limits<int64_t>::min()};
+    int RdtsMustSignalBegin{0};
+    int RdtsMustSignalEnd{0};
+    /** Whether the RDTS flag-day rules apply to a block with this timestamp. */
+    bool RdtsActiveAtTime(int64_t nTime) const {
+        return nTime >= HardforkTime && nTime < RdtsExpiryTime;
+    }
+
+    /**
      * If true, witness commitments contain a payload equal to a Bitcoin Script solution
      * to the signet challenge. See BIP325.
      */
