@@ -4693,6 +4693,25 @@ static bool ContextualCheckBlockHeaderVolatile(const CBlockHeader& block, BlockV
 {
     const Consensus::Params& consensusParams = chainman.GetConsensus();
 
+    // RDTS mandatory signalling: pre-fork blocks in the hardcoded window must
+    // signal RDTS_SIGNAL_BIT. These rejections are what invalidate the
+    // non-signalling majority chain below the fork, so the check must never be
+    // relaxed. The fork itself ends the requirement (RdtsMustSignalAt's time
+    // clause), so post-fork blocks at in-window heights are exempt.
+    {
+        const int nHeight{pindexPrev == nullptr ? 0 : pindexPrev->nHeight + 1};
+        if (consensusParams.RdtsMustSignalAt(nHeight, block.GetBlockTime())) {
+            const bool fVersionBits = (block.nVersion & VERSIONBITS_TOP_MASK) == VERSIONBITS_TOP_BITS;
+            const bool fDeploymentBit = (block.nVersion & (uint32_t{1} << Consensus::RDTS_SIGNAL_BIT)) != 0;
+            if (!(fVersionBits && fDeploymentBit)) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                   "bad-version-reduced_data",
+                                   strprintf("Block at height %d must signal for reduced_data within [%d, %d)",
+                                           nHeight, consensusParams.RdtsMustSignalBegin, consensusParams.RdtsMustSignalEnd));
+            }
+        }
+    }
+
     // Mandatory signaling for deployments approaching max_activation_height
     for (int i = 0; i < (int)Consensus::MAX_VERSION_BITS_DEPLOYMENTS; i++) {
         const Consensus::DeploymentPos pos = static_cast<Consensus::DeploymentPos>(i);
@@ -5480,35 +5499,23 @@ std::vector<CBlockIndex*> Chainstate::FindRdtsSignalingViolations() const
     std::vector<CBlockIndex*> violators;
 
     const Consensus::Params& params{m_chainman.GetConsensus()};
-    // RDTS is the only Knots deployment that sets a mandatory-signaling
-    // deadline; this is deliberately scoped to it. A future deployment with
-    // max_activation_height set would need its own handling.
-    const Consensus::DeploymentPos dep{Consensus::DEPLOYMENT_REDUCED_DATA};
-    const auto& deployment{params.vDeployments[dep]};
 
-    // Only a configured mandatory-signaling deadline can be violated. A
-    // non-enforcing node leaves max_activation_height at its INT_MAX default,
-    // so it is naturally excluded here.
-    if (deployment.max_activation_height >= std::numeric_limits<int>::max()) return violators;
-
-    // A block must signal only within [max_activation_height - 2P, max_activation_height - P).
-    const int period{static_cast<int>(params.nMinerConfirmationWindow)};
-    const int window_begin{deployment.max_activation_height - (2 * period)};
-    const int window_end{deployment.max_activation_height - period};
+    // Only a configured mandatory-signalling window can be violated. A
+    // non-enforcing node has the window unset (begin == end), so it is
+    // naturally excluded here.
+    if (params.RdtsMustSignalBegin >= params.RdtsMustSignalEnd) return violators;
 
     // One pass over the whole block index (not just the active chain, so a
-    // violator on a side branch is corrected too). The cheap height comparison
-    // gates the more expensive versionbits State() lookup. Within the window a
-    // block was required to signal iff the deployment is STARTED for its branch,
-    // the same condition ConnectBlock/ContextualCheckBlockHeaderVolatile applies.
-    // The verdict is re-derived from the stored header, so it does not change as
-    // other blocks are invalidated and one scan suffices.
+    // violator on a side branch is corrected too). RdtsMustSignalAt is the
+    // same predicate ContextualCheckBlockHeaderVolatile applies: in-window
+    // height AND pre-fork timestamp (a post-fork block is exempt even at an
+    // in-window height). The verdict is re-derived from the stored header, so
+    // it does not change as other blocks are invalidated and one scan suffices.
     for (auto& [_, index] : m_blockman.m_block_index) {
         if (index.nStatus & BLOCK_FAILED_MASK) continue;             // already handled
-        if (index.nHeight < window_begin || index.nHeight >= window_end) continue;
-        if (m_chainman.m_versionbitscache.State(index.pprev, params, dep) != ThresholdState::STARTED) continue;
+        if (!params.RdtsMustSignalAt(index.nHeight, index.GetBlockTime())) continue;
         const bool signals_top{(index.nVersion & VERSIONBITS_TOP_MASK) == VERSIONBITS_TOP_BITS};
-        const bool signals_bit{(index.nVersion & (uint32_t{1} << deployment.bit)) != 0};
+        const bool signals_bit{(index.nVersion & (uint32_t{1} << Consensus::RDTS_SIGNAL_BIT)) != 0};
         if (signals_top && signals_bit) continue;                    // signaled correctly
         violators.push_back(&index);
     }

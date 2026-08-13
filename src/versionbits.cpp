@@ -287,6 +287,18 @@ int32_t VersionBitsCache::ComputeBlockVersion(const CBlockIndex* pindexPrev, con
         }
     }
 
+    // RDTS mandatory signalling (hardcoded window, not versionbits): blocks we
+    // mine inside the window must set the bit or every enforcing node rejects
+    // them. The next block's timestamp does not exist yet, so approximate its
+    // fork side by the parent's; that can only over-signal at the boundary
+    // (the first post-fork block may signal unnecessarily), which is valid.
+    // This is also what keeps the unknown-versionbits warning quiet: the
+    // warning fires for signalled bits this function does not expect.
+    if (pindexPrev != nullptr &&
+        params.RdtsMustSignalAt(pindexPrev->nHeight + 1, pindexPrev->GetBlockTime())) {
+        nVersion |= (int32_t{1} << Consensus::RDTS_SIGNAL_BIT);
+    }
+
     return nVersion;
 }
 

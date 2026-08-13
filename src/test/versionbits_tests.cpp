@@ -1133,4 +1133,55 @@ BOOST_AUTO_TEST_CASE(versionbits_no_signaling_after_expired)
     cleanup();
 }
 
+/* RDTS mandatory signalling is hardcoded (RdtsMustSignalAt + RDTS_SIGNAL_BIT),
+ * not versionbits-driven: ComputeBlockVersion must set the bit for a window
+ * block with a pre-fork parent, and stop at the window edge and at the fork. */
+BOOST_AUTO_TEST_CASE(rdts_hardcoded_signalling)
+{
+    // Silence all versionbits deployments so the loop in ComputeBlockVersion
+    // takes only sentinel paths; what remains is the hardcoded RDTS term.
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    Consensus::Params params = chainParams->GetConsensus();
+    for (int i = 0; i < (int)Consensus::MAX_VERSION_BITS_DEPLOYMENTS; ++i) {
+        params.vDeployments[i].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+    }
+    params.HardforkTime = 2'000'000'000;
+    params.RdtsExpiryTime = 3'000'000'000;
+    params.RdtsMustSignalBegin = 100;
+    params.RdtsMustSignalEnd = 200;
+
+    // The predicate: [begin, end) by height, and the fork ends the requirement.
+    const int64_t pre_fork{params.HardforkTime - 1};
+    BOOST_CHECK(!params.RdtsMustSignalAt(99, pre_fork));
+    BOOST_CHECK(params.RdtsMustSignalAt(100, pre_fork));
+    BOOST_CHECK(params.RdtsMustSignalAt(199, pre_fork));
+    BOOST_CHECK(!params.RdtsMustSignalAt(200, pre_fork));
+    BOOST_CHECK(!params.RdtsMustSignalAt(150, params.HardforkTime));
+
+    VersionBitsCache vbcache;
+    const int32_t rdts_mask{int32_t{1} << Consensus::RDTS_SIGNAL_BIT};
+    CBlockIndex parent;
+    parent.nTime = static_cast<uint32_t>(pre_fork);
+
+    parent.nHeight = 99; // next block 100: first in-window
+    BOOST_CHECK(vbcache.ComputeBlockVersion(&parent, params) & rdts_mask);
+    parent.nHeight = 198; // next block 199: last in-window
+    BOOST_CHECK(vbcache.ComputeBlockVersion(&parent, params) & rdts_mask);
+    parent.nHeight = 98; // next block 99: below the window
+    BOOST_CHECK_EQUAL(vbcache.ComputeBlockVersion(&parent, params) & rdts_mask, 0);
+    parent.nHeight = 199; // next block 200: past the window
+    BOOST_CHECK_EQUAL(vbcache.ComputeBlockVersion(&parent, params) & rdts_mask, 0);
+
+    // In-window height but post-fork parent: exempt (the fork ends signalling).
+    parent.nHeight = 150;
+    parent.nTime = static_cast<uint32_t>(params.HardforkTime);
+    BOOST_CHECK_EQUAL(vbcache.ComputeBlockVersion(&parent, params) & rdts_mask, 0);
+
+    // Window unset (begin == end): never signals.
+    params.RdtsMustSignalBegin = params.RdtsMustSignalEnd = 0;
+    parent.nHeight = 150;
+    parent.nTime = static_cast<uint32_t>(pre_fork);
+    BOOST_CHECK_EQUAL(vbcache.ComputeBlockVersion(&parent, params) & rdts_mask, 0);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
