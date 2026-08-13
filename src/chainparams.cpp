@@ -56,6 +56,52 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
     if (auto value = args.GetBoolArg("-fastprune")) options.fastprune = *value;
     if (HasTestOption(args, "bip94")) options.enforce_bip94 = true;
 
+    if (const auto arg{args.GetArg("-hardforktime", "")}; !arg.empty()) {
+        // Sets Consensus::Params::HardforkTime. NOTE: the powchange branch has
+        // its own regtest knob (-powchangetime) writing the same field; when
+        // both branches are assembled, tests must use one or the other, and
+        // the knobs may want folding together.
+        int64_t hardfork_time;
+        // Must postdate the regtest genesis block (1296688602): an earlier
+        // fork time would put genesis itself on the post-fork side.
+        if (!ParseInt64(arg, &hardfork_time) || hardfork_time <= 1296688602) {
+            throw std::runtime_error(strprintf("Invalid time (%s) for -hardforktime=<time>: must exceed the regtest genesis timestamp (1296688602).", arg));
+        }
+        options.hardfork_time = hardfork_time;
+    }
+
+    if (const auto arg{args.GetArg("-rdtsexpiry", "")}; !arg.empty()) {
+        // The RDTS activation time is -hardforktime: one fork instant, as on
+        // mainnet. Only the end of the flag day is schedulable here; a separate
+        // activation time would let tests schedule the two apart, which no
+        // real network can do.
+        if (!options.hardfork_time) {
+            throw std::runtime_error("-rdtsexpiry requires -hardforktime (RDTS activates at the hardfork).");
+        }
+        int64_t expiry;
+        if (!ParseInt64(arg, &expiry) || expiry <= *options.hardfork_time) {
+            throw std::runtime_error(strprintf("Invalid expiry (%s) for -rdtsexpiry: must parse and exceed -hardforktime.", arg));
+        }
+        options.rdts_expiry_time = expiry;
+    }
+
+    if (const auto arg{args.GetArg("-rdtssignalwindow", "")}; !arg.empty()) {
+        // The window's early cutoff compares block times against -hardforktime,
+        // so a window without a scheduled fork is meaningless.
+        if (!options.hardfork_time) {
+            throw std::runtime_error("-rdtssignalwindow requires -hardforktime (the fork ends the signalling requirement).");
+        }
+        const std::vector<std::string> parts{SplitString(arg, ':')};
+        int32_t begin, end;
+        // begin >= 1: a window that includes genesis (height 0) flags it as an
+        // unrecoverable signalling violator and wedges startup.
+        if (parts.size() != 2 || !ParseInt32(parts[0], &begin) || !ParseInt32(parts[1], &end) || begin < 1 || end < begin) {
+            throw std::runtime_error(strprintf("Invalid signalling window (%s) for -rdtssignalwindow=<begin>:<end>.", arg));
+        }
+        options.rdts_must_signal_begin = begin;
+        options.rdts_must_signal_end = end;
+    }
+
     for (const std::string& arg : args.GetArgs("-testactivationheight")) {
         const auto found{arg.find('@')};
         if (found == std::string::npos) {

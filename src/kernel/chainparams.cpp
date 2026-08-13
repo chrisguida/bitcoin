@@ -661,6 +661,20 @@ public:
         consensus.nMinimumChainWork = uint256{};
         consensus.defaultAssumeValid = uint256{};
 
+        // Optionally schedule the hardfork (see -hardforktime), the RDTS flag
+        // day relative to it (see -rdtsexpiry), and/or the mandatory-signalling
+        // window (see -rdtssignalwindow). All left unscheduled by default, so
+        // regtest behaviour is unchanged. Genesis predates any valid hardfork
+        // time.
+        if (opts.hardfork_time) {
+            consensus.HardforkTime = *opts.hardfork_time;
+        }
+        if (opts.rdts_expiry_time) {
+            consensus.RdtsExpiryTime = *opts.rdts_expiry_time;
+        }
+        consensus.RdtsMustSignalBegin = opts.rdts_must_signal_begin;
+        consensus.RdtsMustSignalEnd = opts.rdts_must_signal_end;
+
         pchMessageStart[0] = 0xfa;
         pchMessageStart[1] = 0xbf;
         pchMessageStart[2] = 0xb5;

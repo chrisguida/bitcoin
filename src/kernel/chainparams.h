@@ -177,6 +177,17 @@ public:
         std::unordered_map<Consensus::BuriedDeployment, int> activation_heights{};
         bool fastprune{false};
         bool enforce_bip94{false};
+        //! If set, schedule the hardfork at this block time (see -hardforktime).
+        std::optional<int64_t> hardfork_time{};
+        //! If set, RDTS rules apply to blocks with nTime in
+        //! [hardfork_time, rdts_expiry_time) (see -rdtsexpiry). Requires
+        //! hardfork_time to be set.
+        std::optional<int64_t> rdts_expiry_time{};
+        //! Blocks in the [begin, end) height window whose nTime precedes
+        //! hardfork_time must signal the RDTS versionbit (see
+        //! -rdtssignalwindow). Independent of rdts_expiry_time.
+        int rdts_must_signal_begin{0};
+        int rdts_must_signal_end{0};
     };
 
     static std::unique_ptr<const CChainParams> RegTest(const RegTestOptions& options);
