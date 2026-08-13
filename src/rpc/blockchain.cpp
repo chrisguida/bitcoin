@@ -1898,7 +1898,8 @@ UniValue DeploymentInfo(const CBlockIndex* blockindex, const ChainstateManager& 
     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_SEGWIT);
     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TESTDUMMY);
     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TAPROOT);
-    SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_REDUCED_DATA);
+    // RDTS is a flag day, not a versionbits deployment; its reporting is added
+    // separately (see the reduced_data flag-day entry).
     return softforks;
 }
 } // anon namespace

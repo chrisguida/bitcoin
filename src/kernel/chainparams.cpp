@@ -123,24 +123,10 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = 1628640000; // August 11th, 2021
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 709632; // Approximately November 12th, 2021
 
-        // ReducedData Temporary Softfork (RDTS)
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].bit = 4;
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].nStartTime = 1764547200; // December 1st, 2025
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].min_activation_height = 0;
-        // max_activation_height (was 965664, ~September 1st, 2026) is retired:
-        // the mandatory-signalling window it derived is now the explicit
-        // RdtsMustSignal{Begin,End} params below, which additionally end the
-        // requirement at the fork itself. Leaving it set would re-enforce the
-        // window through the generic versionbits path WITHOUT the fork cutoff.
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].max_activation_height = std::numeric_limits<int>::max();
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].active_duration = 52416; // ~1 year
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].threshold = 1109; // 55% of 2016
-
         // RDTS flag day: at the PoW-change hardfork, RDTS rules apply to every
-        // block with nTime in [HardforkTime, RdtsExpiryTime), replacing the
-        // versionbits activation above (which the stall at 961633 prevented
-        // from ever reaching ACTIVE; later commits retire the deployment). The
+        // block with nTime in [HardforkTime, RdtsExpiryTime). (RDTS previously
+        // activated via versionbits; the stall at 961633 prevented it from ever
+        // reaching ACTIVE, and the deployment has been removed.) The
         // mandatory-signalling window restates the versionbits-era
         // [max_activation_height - 2P, max_activation_height - P) rule for
         // pre-fork blocks byte-for-byte; it is cut off early by the fork itself
@@ -151,14 +137,10 @@ public:
         consensus.RdtsMustSignalEnd = 963648;   // == max_activation_height - 2016
 
         if (g_rdts_consent == RDTSConsentFlag::UNSUPPORTED_UNSAFE_NO_ENFORCEMENT && !g_enable_rdts) {
-            consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
-            consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
-            consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].max_activation_height = std::numeric_limits<int>::max();
-            consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].active_duration = std::numeric_limits<int>::max();
-            consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].threshold = 0;
             // Non-consenting nodes enforce neither the RDTS rules nor the
-            // signalling window. HardforkTime is NOT cleared: the PoW change
-            // applies regardless of RDTS consent.
+            // signalling window.
+            // HardforkTime is NOT cleared: the PoW change applies regardless
+            // of RDTS consent, or the node leaves the network at the fork.
             consensus.RdtsExpiryTime = std::numeric_limits<int64_t>::min();
             consensus.RdtsMustSignalBegin = 0;
             consensus.RdtsMustSignalEnd = 0;
@@ -326,14 +308,6 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = 1628640000; // August 11th, 2021
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
 
-        // ReducedData Temporary Softfork (RDTS)
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].bit = 4;
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].nStartTime = 1764547200; // December 1st, 2025
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].min_activation_height = 0;
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].active_duration = 52416; // ~1 year
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].threshold = 1109; // 55% of 2016
-
         consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000000015f5e0c9f13455b0eb17"};
         consensus.defaultAssumeValid = uint256{"00000000000003fc7967410ba2d0a8a8d50daedc318d43e8baf1a9782c236a57"}; // 3974606
 
@@ -431,14 +405,6 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nStartTime = Consensus::BIP9Deployment::ALWAYS_ACTIVE;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
-
-        // ReducedData Temporary Softfork (RDTS)
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].bit = 4;
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].nStartTime = 1764547200; // December 1st, 2025
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].min_activation_height = 0;
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].active_duration = 52416; // ~1 year
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].threshold = 1109; // 55% of 2016
 
         consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000000001d6dce8651b6094e4c1"};
         consensus.defaultAssumeValid = uint256{"0000000000003ed4f08dbdf6f7d6b271a6bcffce25675cb40aa9fa43179a89f3"}; // 72600
@@ -578,11 +544,6 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
 
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].bit = 4;
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].min_activation_height = 0;
-
         // message start is defined as the first 4 bytes of the sha256d of the block script
         HashWriter h{};
         h << consensus.signet_challenge;
@@ -657,11 +618,6 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nStartTime = Consensus::BIP9Deployment::ALWAYS_ACTIVE;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
-
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].bit = 4;
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
-        consensus.vDeployments[Consensus::DEPLOYMENT_REDUCED_DATA].min_activation_height = 0;
 
         consensus.nMinimumChainWork = uint256{};
         consensus.defaultAssumeValid = uint256{};
