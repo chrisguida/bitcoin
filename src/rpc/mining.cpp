@@ -1064,6 +1064,23 @@ static UniValue TemplateToJSON(const Consensus::Params& consensusParams, const C
             }
         }
     }
+    // RDTS flag day (hardcoded; no longer a versionbits deployment).
+    // Pre-fork templates in the mandatory-signalling window must carry
+    // RDTS_SIGNAL_BIT: advertise and require it (the template's nVersion
+    // already has it via ComputeBlockVersion, parent-based like the rule).
+    // Once the flag day covers the template's own time, the rules were
+    // enforced during transaction selection: advertise "reduced_data"
+    // unprefixed, as before the deployment's removal (gbt_force semantics:
+    // clients need no special support, there is no client-side block
+    // construction involved). At the crossing both can appear at once.
+    if (pindexPrev != nullptr && consensusParams.RdtsInSignalWindow(pindexPrev->nHeight + 1)) {
+        vbavailable.pushKV("reduced_data", Consensus::RDTS_SIGNAL_BIT);
+        vbrequired |= (uint32_t{1} << Consensus::RDTS_SIGNAL_BIT);
+    }
+    if (consensusParams.RdtsActiveAtTime(block_header.GetBlockTime())) {
+        aRules.push_back("reduced_data");
+    }
+
     result.pushKV("version", block_header.nVersion);
     result.pushKV("rules", std::move(aRules));
     result.pushKV("vbavailable", std::move(vbavailable));

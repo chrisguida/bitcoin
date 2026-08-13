@@ -42,7 +42,15 @@ from test_framework.wallet import MiniWallet
 FORK_TIME = 1_500_000_000
 EXPIRY_TIME = FORK_TIME + 600_000
 START_TIME = FORK_TIME - 10_000
-RDTS_ARGS = [f'-hardforktime={FORK_TIME}', f'-rdtsexpiry={EXPIRY_TIME}']
+VERSIONBITS_TOP_BITS = 0x20000000
+REDUCED_DATA_BIT = 4
+# node0 also carries a mandatory-signalling window; its end (150) is crossed
+# near the end of the test, so getblocktemplate's height-only advertisement is
+# exercised on both edges: inside the window (including post-fork
+# over-signalling) and past its end.
+SIGNAL_WINDOW_END = 150
+RDTS_ARGS = [f'-hardforktime={FORK_TIME}', f'-rdtsexpiry={EXPIRY_TIME}',
+             f'-rdtssignalwindow=50:{SIGNAL_WINDOW_END}']
 
 
 class TemporaryDeploymentTest(BitcoinTestFramework):
@@ -73,6 +81,9 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         tip_header = node.getblockheader(tip)
         block_time = (ntime if ntime is not None else tip_header['time'] + 1) + time_offset
         block = create_block(int(tip, 16), create_coinbase(height), ntime=block_time, txlist=txs)
+        # Signal the RDTS bit unconditionally: required for pre-fork in-window
+        # heights (node0's -rdtssignalwindow), harmless everywhere else.
+        block.nVersion = VERSIONBITS_TOP_BITS | (1 << REDUCED_DATA_BIT)
         add_witness_commitment(block)
         block.solve()
         return block
@@ -82,6 +93,15 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         for i in range(count):
             block = self.create_block_for_node(node, ntime=ntime if i == 0 else None)
             node.submitblock(block.serialize().hex())
+
+    def assert_gbt_rdts(self, node, *, signalling, active):
+        """Check getblocktemplate's RDTS surface: pre-fork signalling advert
+        (vbavailable/vbrequired/version bit) and post-fork rules entry."""
+        tmpl = node.getblocktemplate({'rules': ['segwit']})
+        assert_equal('reduced_data' in tmpl['rules'], active)
+        assert_equal('reduced_data' in tmpl['vbavailable'], signalling)
+        assert_equal(bool(tmpl['vbrequired'] & (1 << REDUCED_DATA_BIT)), signalling)
+        assert_equal(bool(tmpl['version'] & (1 << REDUCED_DATA_BIT)), signalling)
 
     def create_tx_with_large_output(self, wallet):
         """Create a transaction with 84-byte OP_RETURN (violates BIP-110's 83-byte limit)."""
@@ -119,15 +139,35 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         self.connect_nodes(0, 1)
         self.sync_all()
 
+        # GBT pre-fork, in the window: signalling advertised, rules not yet.
+        self.assert_gbt_rdts(node_bip110, signalling=True, active=False)
+
         # =====================================================================
         # Phase 2: Cross the fork; test enforcement and chain split
         # =====================================================================
         self.log.info("Phase 2: Crossing the fork; testing chain split behavior")
 
-        self.set_mocktime(FORK_TIME)
+        # Regression (halt repro): a parent stamped AHEAD of the clock across
+        # the fork boundary must not wedge template creation. With mocktime an
+        # hour short of the fork, submit a parent stamped FORK_TIME (legal:
+        # within the 2h future allowance). The next template's own curtime is
+        # then pre-fork and in-window, so consensus requires bit 4; a producer
+        # deciding by the parent's (post-fork) time would omit it and fail its
+        # own TestBlockValidity, halting mining until wall clock reaches the
+        # fork. Height-only signalling must keep building valid templates.
+        self.set_mocktime(FORK_TIME - 3600)
         self.mine_blocks_on_node(node_bip110, 1, ntime=FORK_TIME)
         self.sync_all()
         assert_equal(node_bip110.getblockheader(node_bip110.getbestblockhash())['time'], FORK_TIME)
+        # The template still builds (no halt), signals by height, and its own
+        # (pre-fork) time keeps the rules entry off.
+        self.assert_gbt_rdts(node_bip110, signalling=True, active=False)
+
+        self.set_mocktime(FORK_TIME)
+        # After the crossing: signalling is advertised by HEIGHT (still in the
+        # window, deliberate over-signalling), while the rules entry follows
+        # the template time.
+        self.assert_gbt_rdts(node_bip110, signalling=True, active=True)
 
         # Disconnect nodes BEFORE creating invalid block to prevent P2P relay
         # (Bitcoin Core relays blocks via compact blocks before full validation completes)
@@ -245,6 +285,17 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
 
         final_height = node_bip110.getblockcount()
         self.log.info(f"Final height: {final_height}, both nodes synced")
+
+        # GBT post-expiry: no rules entry; signalling still advertised because
+        # the height is inside the window (height-only, deliberate).
+        assert node_bip110.getblockcount() + 1 < SIGNAL_WINDOW_END
+        self.assert_gbt_rdts(node_bip110, signalling=True, active=False)
+
+        # Past the window's end, the signalling advertisement stops too.
+        while node_bip110.getblockcount() + 1 < SIGNAL_WINDOW_END:
+            self.mine_blocks_on_node(node_bip110, 1)
+        self.sync_all()
+        self.assert_gbt_rdts(node_bip110, signalling=False, active=False)
 
         # =====================================================================
         # Summary
