@@ -42,7 +42,12 @@ from test_framework.wallet import MiniWallet
 FORK_TIME = 1_500_000_000
 EXPIRY_TIME = FORK_TIME + 600_000
 START_TIME = FORK_TIME - 10_000
-RDTS_ARGS = [f'-powchangetime={FORK_TIME}:1', f'-rdtsexpiry={EXPIRY_TIME}']
+VERSIONBITS_TOP_BITS = 0x20000000
+REDUCED_DATA_BIT = 4
+# node0 also carries a mandatory-signalling window spanning every height this
+# test reaches, so getblocktemplate's pre-fork advertisement is exercised.
+RDTS_ARGS = [f'-powchangetime={FORK_TIME}:1', f'-rdtsexpiry={EXPIRY_TIME}',
+             '-rdtssignalwindow=50:100000']
 
 
 class TemporaryDeploymentTest(BitcoinTestFramework):
@@ -73,6 +78,9 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         tip_header = node.getblockheader(tip)
         block_time = (ntime if ntime is not None else tip_header['time'] + 1) + time_offset
         block = create_block(int(tip, 16), create_coinbase(height), ntime=block_time, txlist=txs)
+        # Signal the RDTS bit unconditionally: required for pre-fork in-window
+        # heights (node0's -rdtssignalwindow), harmless everywhere else.
+        block.nVersion = VERSIONBITS_TOP_BITS | (1 << REDUCED_DATA_BIT)
         add_witness_commitment(block)
         block.solve()
         return block
@@ -82,6 +90,15 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         for i in range(count):
             block = self.create_block_for_node(node, ntime=ntime if i == 0 else None)
             node.submitblock(block.serialize().hex())
+
+    def assert_gbt_rdts(self, node, *, signalling, active):
+        """Check getblocktemplate's RDTS surface: pre-fork signalling advert
+        (vbavailable/vbrequired/version bit) and post-fork rules entry."""
+        tmpl = node.getblocktemplate({'rules': ['segwit']})
+        assert_equal('reduced_data' in tmpl['rules'], active)
+        assert_equal('reduced_data' in tmpl['vbavailable'], signalling)
+        assert_equal(bool(tmpl['vbrequired'] & (1 << REDUCED_DATA_BIT)), signalling)
+        assert_equal(bool(tmpl['version'] & (1 << REDUCED_DATA_BIT)), signalling)
 
     def create_tx_with_large_output(self, wallet):
         """Create a transaction with 84-byte OP_RETURN (violates BIP-110's 83-byte limit)."""
@@ -119,15 +136,25 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         self.connect_nodes(0, 1)
         self.sync_all()
 
+        # GBT pre-fork, in the window: signalling advertised, rules not yet.
+        self.assert_gbt_rdts(node_bip110, signalling=True, active=False)
+
         # =====================================================================
         # Phase 2: Cross the fork; test enforcement and chain split
         # =====================================================================
         self.log.info("Phase 2: Crossing the fork; testing chain split behavior")
 
         self.set_mocktime(FORK_TIME)
+        # The crossing template: pre-fork parent (signalling still required for
+        # any pre-fork timestamp the miner might stamp) AND post-fork template
+        # time (rules already enforced during selection). Both appear at once.
+        self.assert_gbt_rdts(node_bip110, signalling=True, active=True)
         self.mine_blocks_on_node(node_bip110, 1, ntime=FORK_TIME)
         self.sync_all()
         assert_equal(node_bip110.getblockheader(node_bip110.getbestblockhash())['time'], FORK_TIME)
+
+        # GBT after the crossing: parent is post-fork, signalling over; rules on.
+        self.assert_gbt_rdts(node_bip110, signalling=False, active=True)
 
         # Disconnect nodes BEFORE creating invalid block to prevent P2P relay
         # (Bitcoin Core relays blocks via compact blocks before full validation completes)
@@ -245,6 +272,9 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
 
         final_height = node_bip110.getblockcount()
         self.log.info(f"Final height: {final_height}, both nodes synced")
+
+        # GBT post-expiry: no signalling, no rules entry.
+        self.assert_gbt_rdts(node_bip110, signalling=False, active=False)
 
         # =====================================================================
         # Summary
