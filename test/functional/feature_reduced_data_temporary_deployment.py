@@ -2,30 +2,23 @@
 # Copyright (c) 2025 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test temporary BIP9 deployment with active_duration parameter.
+"""Test the temporary RDTS flag-day deployment.
 
-This test verifies that a BIP9 deployment with active_duration properly expires
-after the specified number of blocks. We use REDUCED_DATA as the test deployment
-with active_duration=144 blocks.
+RDTS rules apply to blocks whose own nTime lies in [hardforktime, rdtsexpiry).
+This branch carries no PoW-change machinery, so a node WITHOUT the flag day
+can still follow the chain.
 
 The test uses two nodes:
-- Node 0: BIP-110 enforcing (active_duration=144)
-- Node 1: Non-BIP-110 (never active, simulates Bitcoin Core)
+- Node 0: BIP-110 enforcing (flag day scheduled)
+- Node 1: No flag day (simulates Bitcoin Core)
 
 The test verifies:
-1. BIP9 state transitions: DEFINED -> STARTED -> LOCKED_IN -> ACTIVE
-2. Consensus rules ARE enforced during the active period (blocks 432-575)
+1. Before the fork time, both nodes accept the same blocks (rules inactive)
+2. Consensus rules ARE enforced for blocks with nTime >= fork time (node0 only)
 3. Chain split: BIP-110 node rejects invalid blocks, non-BIP-110 accepts
 4. Reorg: Longer valid chain wins when nodes reconnect
-5. Consensus rules STOP being enforced after expiry (block 576+)
-6. Post-expiry convergence: Both nodes accept the same blocks
-
-Expected timeline:
-- Period 0 (blocks 0-143): DEFINED
-- Period 1 (blocks 144-287): STARTED (signaling happens here)
-- Period 2 (blocks 288-431): LOCKED_IN
-- Period 3 (blocks 432-575): ACTIVE (144 blocks, rules enforced on node0 only)
-- Block 576+: EXPIRED (rules no longer enforced, nodes converge)
+5. Rules are enforced up to the last pre-expiry block time
+6. Rules STOP being enforced at nTime >= expiry; nodes converge again
 """
 
 from test_framework.blocktools import (
@@ -44,45 +37,50 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
 from test_framework.wallet import MiniWallet
 
-REDUCED_DATA_BIT = 4
-VERSIONBITS_TOP_BITS = 0x20000000
+# RDTS flag day. Block times are steered with setmocktime and explicit ntime;
+# setup blocks stay below FORK_TIME.
+FORK_TIME = 1_500_000_000
+EXPIRY_TIME = FORK_TIME + 600_000
+START_TIME = FORK_TIME - 10_000
+RDTS_ARGS = [f'-hardforktime={FORK_TIME}', f'-rdtsexpiry={EXPIRY_TIME}']
 
 
 class TemporaryDeploymentTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 2
         self.setup_clean_chain = True
-        # Node 0: BIP-110 with active_duration=144 blocks
-        # Node 1: BIP-110 never active (simulates Bitcoin Core)
-        # NEVER_ACTIVE = -2 for start_time prevents deployment from ever leaving DEFINED state
+        # Node 0: RDTS flag day scheduled
+        # Node 1: no flag day (simulates Bitcoin Core; regtest default is inactive)
         self.extra_args = [
-            ['-vbparams=reduced_data:0:999999999999:0:2147483647:144', '-acceptnonstdtxn=1'],
-            ['-vbparams=reduced_data:-2:-1', '-acceptnonstdtxn=1'],
+            RDTS_ARGS + ['-acceptnonstdtxn=1'],
+            ['-acceptnonstdtxn=1'],
         ]
 
     def setup_network(self):
         self.setup_nodes()
         self.connect_nodes(0, 1)
 
-    def create_block_for_node(self, node, txs=None, signal=False, time_offset=0):
+    def set_mocktime(self, t):
+        for node in self.nodes:
+            node.setmocktime(t)
+
+    def create_block_for_node(self, node, txs=None, ntime=None, time_offset=0):
         """Create a block for a specific node."""
         if txs is None:
             txs = []
         tip = node.getbestblockhash()
         height = node.getblockcount() + 1
         tip_header = node.getblockheader(tip)
-        block_time = tip_header['time'] + 1 + time_offset
+        block_time = (ntime if ntime is not None else tip_header['time'] + 1) + time_offset
         block = create_block(int(tip, 16), create_coinbase(height), ntime=block_time, txlist=txs)
-        if signal:
-            block.nVersion = VERSIONBITS_TOP_BITS | (1 << REDUCED_DATA_BIT)
         add_witness_commitment(block)
         block.solve()
         return block
 
-    def mine_blocks_on_node(self, node, count, signal=False):
-        """Mine count blocks on a specific node."""
-        for _ in range(count):
-            block = self.create_block_for_node(node, signal=signal)
+    def mine_blocks_on_node(self, node, count, ntime=None):
+        """Mine count blocks on a specific node (only the first uses ntime)."""
+        for i in range(count):
+            block = self.create_block_for_node(node, ntime=ntime if i == 0 else None)
             node.submitblock(block.serialize().hex())
 
     def create_tx_with_large_output(self, wallet):
@@ -94,14 +92,6 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         tx.rehash()
         return tx
 
-    def get_deployment_status(self, node):
-        """Get reduced_data deployment status."""
-        info = node.getdeploymentinfo()
-        rd = info['deployments']['reduced_data']
-        if 'bip9' in rd:
-            return rd['bip9']['status'], rd['bip9'].get('since', 'N/A')
-        return rd.get('status'), rd.get('since', 'N/A')
-
     def run_test(self):
         node_bip110 = self.nodes[0]
         node_core = self.nodes[1]
@@ -109,53 +99,35 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         wallet = MiniWallet(node_bip110)
 
         # =====================================================================
-        # Phase 1: Build common chain through BIP9 state transitions
+        # Phase 1: Build common pre-fork chain
         # =====================================================================
-        self.log.info("Phase 1: Building common chain through BIP9 states")
+        self.log.info("Phase 1: Building common pre-fork chain")
 
+        self.set_mocktime(START_TIME)
         self.log.info("Mining initial blocks for spendable coins...")
-        self.generate(wallet, 101)
+        self.generate(wallet, 110)
         self.sync_all()
+        assert node_bip110.getblockheader(node_bip110.getbestblockhash())['time'] < FORK_TIME
 
-        status, _ = self.get_deployment_status(node_bip110)
-        assert_equal(status, 'defined')
-
-        # Mine to end of period 0
-        self.log.info("Mining through period 0 (DEFINED)...")
-        self.generate(node_bip110, 42)
+        # Rules are not enforced pre-fork: both nodes accept a violating block.
+        self.log.info("Test: pre-fork, both nodes accept a block violating BIP-110 rules")
+        self.disconnect_nodes(0, 1)
+        tx_invalid = self.create_tx_with_large_output(wallet)
+        block_invalid = self.create_block_for_node(node_bip110, [tx_invalid])
+        assert_equal(node_bip110.submitblock(block_invalid.serialize().hex()), None)
+        assert_equal(node_core.submitblock(block_invalid.serialize().hex()), None)
+        self.connect_nodes(0, 1)
         self.sync_all()
-        assert_equal(node_bip110.getblockcount(), 143)
-
-        # Period 1: Signal for activation
-        self.log.info("Mining period 1 with signaling (STARTED)...")
-        self.mine_blocks_on_node(node_bip110, 144, signal=True)
-        self.sync_all()
-        assert_equal(node_bip110.getblockcount(), 287)
-        status, _ = self.get_deployment_status(node_bip110)
-        assert_equal(status, 'started')
-
-        # Period 2: Lock in
-        self.log.info("Mining period 2 (LOCKED_IN)...")
-        self.mine_blocks_on_node(node_bip110, 144, signal=True)
-        self.sync_all()
-        assert_equal(node_bip110.getblockcount(), 431)
-        status, since = self.get_deployment_status(node_bip110)
-        assert_equal(status, 'locked_in')
-        assert_equal(since, 288)
 
         # =====================================================================
-        # Phase 2: Test activation and chain split
+        # Phase 2: Cross the fork; test enforcement and chain split
         # =====================================================================
-        self.log.info("Phase 2: Testing activation and chain split behavior")
+        self.log.info("Phase 2: Crossing the fork; testing chain split behavior")
 
-        # Mine block 432 (activation)
-        self.mine_blocks_on_node(node_bip110, 1)
+        self.set_mocktime(FORK_TIME)
+        self.mine_blocks_on_node(node_bip110, 1, ntime=FORK_TIME)
         self.sync_all()
-        assert_equal(node_bip110.getblockcount(), 432)
-        status, since = self.get_deployment_status(node_bip110)
-        self.log.info(f"Block 432 - Status: {status}, Since: {since}")
-        assert_equal(status, 'active')
-        assert_equal(since, 432)
+        assert_equal(node_bip110.getblockheader(node_bip110.getbestblockhash())['time'], FORK_TIME)
 
         # Disconnect nodes BEFORE creating invalid block to prevent P2P relay
         # (Bitcoin Core relays blocks via compact blocks before full validation completes)
@@ -168,15 +140,16 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         block_invalid = self.create_block_for_node(node_bip110, [tx_invalid])
 
         # Submit to BIP-110 node - should be rejected
+        split_base_height = node_bip110.getblockcount()
         result_bip110 = node_bip110.submitblock(block_invalid.serialize().hex())
         assert_equal(result_bip110, 'bad-txns-vout-script-toolarge')
-        assert_equal(node_bip110.getblockcount(), 432)
+        assert_equal(node_bip110.getblockcount(), split_base_height)
 
         # Submit to non-BIP-110 node - should be accepted
         self.log.info("Test: Non-BIP-110 node accepts the same block")
         result_core = node_core.submitblock(block_invalid.serialize().hex())
         assert_equal(result_core, None)
-        assert_equal(node_core.getblockcount(), 433)
+        assert_equal(node_core.getblockcount(), split_base_height + 1)
 
         # Chain split confirmed
         self.log.info(f"Chain split: BIP-110={node_bip110.getblockcount()}, Core={node_core.getblockcount()}")
@@ -184,21 +157,29 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         # =====================================================================
         # Phase 3: Test reorg behavior
         # =====================================================================
-        self.log.info("Phase 3: Testing reorg behavior")
+        # NOTE: this phase models SOFTFORK dynamics (possible here because this
+        # branch carries no PoW-change machinery): the non-enforcing node accepts
+        # both chains and reorgs onto the enforcing chain when it has more work,
+        # wiping out the violating block. On mainnet, with a real algorithm
+        # change, a no-flag-day node cannot validate post-fork blocks at all
+        # and no such reorg exists. What this phase pins is (a) RDTS rules stay
+        # forward-compatible (valid-under-RDTS implies valid-without), and
+        # (b) convergence among mixed-enforcement nodes on the same PoW.
+        self.log.info("Phase 3: Testing reorg behavior (softfork wipeout dynamics)")
 
         # Non-BIP-110 extends its chain
         self.log.info("Non-BIP-110 node extends chain with 3 more blocks...")
         for i in range(3):
             block = self.create_block_for_node(node_core, time_offset=i)
             node_core.submitblock(block.serialize().hex())
-        assert_equal(node_core.getblockcount(), 436)
+        assert_equal(node_core.getblockcount(), split_base_height + 4)
 
         # BIP-110 node builds longer valid chain
         self.log.info("BIP-110 node builds longer valid chain (5 blocks)...")
         for i in range(5):
-            block = self.create_block_for_node(node_bip110, time_offset=i+10)
+            block = self.create_block_for_node(node_bip110, time_offset=i + 10)
             node_bip110.submitblock(block.serialize().hex())
-        assert_equal(node_bip110.getblockcount(), 437)
+        assert_equal(node_bip110.getblockcount(), split_base_height + 5)
 
         # Reconnect - non-BIP-110 should reorg to BIP-110's chain
         self.log.info("Reconnecting nodes - expecting reorg...")
@@ -206,36 +187,30 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         self.sync_blocks()
 
         assert_equal(node_core.getbestblockhash(), node_bip110.getbestblockhash())
-        assert_equal(node_core.getblockcount(), 437)
         self.log.info(f"Reorg complete: both nodes at height {node_core.getblockcount()}")
 
         # =====================================================================
         # Phase 4: Test rules enforced until expiry
         # =====================================================================
-        self.log.info("Phase 4: Testing rules enforced until expiry")
+        self.log.info("Phase 4: Testing rules enforced up to the expiry boundary")
 
-        # Mine to block 574 (one before last active block)
-        # active_duration=144, activation at 432, so last active block is 432+144-1=575
-        blocks_to_574 = 574 - node_bip110.getblockcount()
-        self.log.info(f"Mining {blocks_to_574} blocks to reach block 574...")
-        self.generate(node_bip110, blocks_to_574)
+        self.set_mocktime(EXPIRY_TIME)
+        self.mine_blocks_on_node(node_bip110, 1, ntime=EXPIRY_TIME - 2)
         self.sync_all()
-        assert_equal(node_bip110.getblockcount(), 574)
 
         # Disconnect nodes to prevent compact block relay of invalid block
         self.disconnect_nodes(0, 1)
 
-        # Verify rules still enforced at block 575 (last active block)
-        self.log.info("Test: Rules still enforced at block 575 (last active block)")
+        # Verify rules still enforced at nTime EXPIRY_TIME - 1 (last active time)
+        self.log.info("Test: Rules still enforced at nTime EXPIRY_TIME - 1")
         tx_invalid = self.create_tx_with_large_output(wallet)
-        block_invalid = self.create_block_for_node(node_bip110, [tx_invalid])
+        block_invalid = self.create_block_for_node(node_bip110, [tx_invalid], ntime=EXPIRY_TIME - 1)
         result = node_bip110.submitblock(block_invalid.serialize().hex())
         assert_equal(result, 'bad-txns-vout-script-toolarge')
 
-        # Mine valid block 575 (last active block)
-        block_valid = self.create_block_for_node(node_bip110)
-        node_bip110.submitblock(block_valid.serialize().hex())
-        assert_equal(node_bip110.getblockcount(), 575)
+        # Mine a valid block at the last active time instead
+        block_valid = self.create_block_for_node(node_bip110, ntime=EXPIRY_TIME - 1)
+        assert_equal(node_bip110.submitblock(block_valid.serialize().hex()), None)
 
         # Reconnect and sync
         self.connect_nodes(0, 1)
@@ -246,20 +221,12 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         # =====================================================================
         self.log.info("Phase 5: Testing expiry - rules no longer enforced")
 
-        # At block 576, deployment has expired (first expired block = 432 + 144)
-        self.log.info("Test: BIP-110 node accepts 'invalid' block at height 576 (expired)")
+        self.log.info("Test: BIP-110 node accepts 'invalid' block at nTime EXPIRY_TIME")
         tx_invalid = self.create_tx_with_large_output(wallet)
-        block_after_expiry = self.create_block_for_node(node_bip110, [tx_invalid])
+        block_after_expiry = self.create_block_for_node(node_bip110, [tx_invalid], ntime=EXPIRY_TIME)
         result = node_bip110.submitblock(block_after_expiry.serialize().hex())
         assert_equal(result, None)
         self.sync_all()
-        assert_equal(node_bip110.getblockcount(), 576)
-
-        # Verify state machine reports EXPIRED
-        status, since = self.get_deployment_status(node_bip110)
-        self.log.info(f"Block 576: Status={status}, Since={since}")
-        assert_equal(status, 'expired')
-        assert_equal(since, 576)
 
         # =====================================================================
         # Phase 6: Test post-expiry convergence
@@ -283,11 +250,11 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         # Summary
         # =====================================================================
         self.log.info("All tests passed:")
-        self.log.info("  - BIP9 state transitions (DEFINED -> STARTED -> LOCKED_IN -> ACTIVE -> EXPIRED)")
-        self.log.info("  - Chain split at activation (BIP-110 rejects, Core accepts)")
+        self.log.info("  - Rules inactive pre-fork (both nodes accept violating block)")
+        self.log.info("  - Chain split at the fork time (BIP-110 rejects, Core accepts)")
         self.log.info("  - Reorg to longer valid chain on reconnect")
-        self.log.info("  - Rules enforced during active period (432-575)")
-        self.log.info("  - Rules not enforced after expiry (576+)")
+        self.log.info("  - Rules enforced for block times in [fork, expiry)")
+        self.log.info("  - Rules not enforced at nTime >= expiry")
         self.log.info("  - Post-expiry convergence (both nodes accept same blocks)")
 
 

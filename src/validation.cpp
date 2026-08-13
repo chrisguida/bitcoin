@@ -2704,7 +2704,12 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
         flags |= SCRIPT_VERIFY_NULLDUMMY;
     }
 
-    if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_REDUCED_DATA)) {
+    // RDTS activates on the flag day, not via versionbits: the rules apply to
+    // exactly the blocks whose own nTime lies in [HardforkTime,
+    // RdtsExpiryTime). Note the block's own timestamp, not the parent's: the
+    // versionbits-style "state of block N = state after N's parent" identity
+    // would be one block late for a time predicate.
+    if (chainman.GetConsensus().RdtsActiveAtTime(block_index.GetBlockTime())) {
         flags |= REDUCED_DATA_MANDATORY_VERIFY_FLAGS;
     }
 
@@ -2922,13 +2927,12 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     std::vector<PrecomputedTransactionData> txsdata(block.vtx.size());
     CCheckQueueControl<CScriptCheck> control(fScriptChecks && parallel_script_checks ? &m_chainman.GetCheckQueue() : nullptr);
 
-    // For BIP9 deployments, get the activation height dynamically. When RDTS is
-    // inactive the start height is 0, so no input is treated as pre-activation and
+    // RDTS is active for exactly the blocks whose own nTime lies in
+    // [HardforkTime, RdtsExpiryTime); see RdtsActiveAtTime. When it is
+    // inactive, no input is treated as pre-activation below and
     // flags_per_input stays empty (keeping the script-execution cache enabled).
-    const bool reduced_data_active{DeploymentActiveAt(*pindex, m_chainman, Consensus::DEPLOYMENT_REDUCED_DATA)};
-    const auto reduced_data_start_height = reduced_data_active
-        ? m_chainman.m_versionbitscache.StateSinceHeight(pindex->pprev, params.GetConsensus(), Consensus::DEPLOYMENT_REDUCED_DATA)
-        : 0;
+    const Consensus::Params& consensus_params{params.GetConsensus()};
+    const bool reduced_data_active{consensus_params.RdtsActiveAtTime(pindex->GetBlockTime())};
 
     const CheckTxInputsRules chk_input_rules{reduced_data_active ? CheckTxInputsRules::OutputSizeLimit : CheckTxInputsRules::None};
 
@@ -2980,9 +2984,19 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             flags_per_input.clear();
             for (size_t j = 0; j < tx.vin.size(); j++) {
                 prevheights[j] = view.AccessCoin(tx.vin[j].prevout).nHeight;
-                if (prevheights[j] < reduced_data_start_height) {
-                    flags_per_input.resize(tx.vin.size(), flags);
-                    flags_per_input[j] = flags & ~REDUCED_DATA_MANDATORY_VERIFY_FLAGS;
+                if (reduced_data_active) {
+                    // Grandfathering: coins created by pre-fork blocks keep
+                    // pre-RDTS script rules; spending some of them under the
+                    // new limits would otherwise be impossible. The creating
+                    // block is this branch's ancestor at the coin's height
+                    // (exact under reorgs: competing branches are judged by
+                    // their own ancestors). A coin created earlier in this
+                    // same block yields pindex itself, which is post-fork.
+                    const CBlockIndex* coin_block{Assert(pindex->GetAncestor(prevheights[j]))};
+                    if (coin_block->GetBlockTime() < consensus_params.HardforkTime) {
+                        flags_per_input.resize(tx.vin.size(), flags);
+                        flags_per_input[j] = flags & ~REDUCED_DATA_MANDATORY_VERIFY_FLAGS;
+                    }
                 }
             }
 
