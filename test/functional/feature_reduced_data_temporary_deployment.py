@@ -293,6 +293,11 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         self.assert_gbt_rdts(node_bip110, signalling=False, active=False)
         self.assert_rdts_deploymentinfo(node_bip110, active=False, must_signal=False)
 
+        # The enforcing node never latches the unknown-versionbits warning
+        # across the boundary, even though the 100-block lookback still holds
+        # pre-fork bit-4 signalling blocks (they were expected, so not counted).
+        assert 'Unknown new rules' not in ''.join(node_bip110.getblockchaininfo()['warnings'])
+
         # =====================================================================
         # Summary
         # =====================================================================

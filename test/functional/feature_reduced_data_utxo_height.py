@@ -378,6 +378,17 @@ class ReducedDataUTXOHeightTest(BitcoinTestFramework):
         self.log.info("✓ SUCCESS: Per-branch fork-boundary verdicts enforced; no cache poisoning")
 
         # ======================================================================
+        # Test 9: -reindex replays the whole chain, including grandfathered
+        # spends, to the same tip (the stateless cutoff needs no stored state)
+        # ======================================================================
+        self.log.info("Test 9: -reindex reproduces identical grandfathering verdicts")
+        node.reconsiderblock(post_fork_tip)
+        tip_before_reindex = node.getbestblockhash()
+        self.restart_node(0, extra_args=RDTS_ARGS + ['-reindex'])
+        self.wait_until(lambda: node.getbestblockhash() == tip_before_reindex, timeout=60)
+        self.log.info("✓ SUCCESS: -reindex reconnected the chain with exempt spends intact")
+
+        # ======================================================================
         # Summary
         # ======================================================================
         self.log.info(f"""
