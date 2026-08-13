@@ -114,10 +114,13 @@ class ReducedDataTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        # Make DEPLOYMENT_REDUCED_DATA always active (from block 0)
-        # Using start_time=-1 (ALWAYS_ACTIVE) bypasses BIP9 state machine
+        # Schedule the RDTS flag day just after the genesis timestamp, so the
+        # rules are active for every mined block (wall-clock times are far past
+        # it) and only the genesis block itself is pre-fork. Algo 1 (SHA256d)
+        # keeps the PoW side of the hardfork inert; RDTS activates by time.
         self.extra_args = [[
-            '-vbparams=reduced_data:-1:999999999999:0',
+            '-powchangetime=1296688603:1',
+            '-rdtsexpiry=9999999999',
             '-acceptnonstdtxn=1',
         ]]
 

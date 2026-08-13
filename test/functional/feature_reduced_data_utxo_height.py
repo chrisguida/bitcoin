@@ -2,17 +2,20 @@
 # Copyright (c) 2025 The Bitcoin Knots developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test REDUCED_DATA soft fork UTXO height checking.
+"""Test REDUCED_DATA flag-day UTXO grandfathering.
 
-This test verifies that the REDUCED_DATA deployment correctly exempts UTXOs
-created before ReducedDataHeightBegin from reduced_data script validation rules,
-as implemented in validation.cpp.
+RDTS activates for blocks whose own nTime lies in [powchangetime, rdtsexpiry).
+Inputs spending coins created by PRE-FORK blocks (creating block's nTime before
+the fork) are exempt from reduced_data script validation rules, as implemented
+in validation.cpp (per-input GetAncestor time check).
 
 Test scenarios:
-1. Old UTXO (created before activation) spent during active period with violation - should be ACCEPTED (EXEMPT)
-2. New UTXO (created during active period) spent with violation - should be REJECTED
-3. Mixed inputs (old + new UTXOs) in same transaction
-4. Boundary test: UTXO created at exactly ReducedDataHeightBegin
+1. Old UTXO (created pre-fork) spent post-fork with violation - ACCEPTED (EXEMPT)
+2. New UTXO (created post-fork) spent with violation - REJECTED
+3. Mixed inputs (old + new UTXOs) in same transaction - REJECTED
+4. Boundary: coin created at nTime == fork time - 1 is exempt; at fork time is not
+5. Reorg across the fork boundary: the same coin is judged per-branch, and the
+   script-execution cache must not leak a verdict between branches
 """
 
 from io import BytesIO
@@ -24,19 +27,16 @@ from test_framework.blocktools import (
     add_witness_commitment,
 )
 from test_framework.messages import (
-    COIN,
     COutPoint,
     CTransaction,
     CTxIn,
     CTxInWitness,
     CTxOut,
 )
-from test_framework.p2p import P2PDataStore
 from test_framework.script import (
     CScript,
     OP_TRUE,
     OP_DROP,
-    hash256,
 )
 from test_framework.script_util import (
     script_to_p2wsh_script,
@@ -48,11 +48,14 @@ from test_framework.util import (
 from test_framework.wallet import MiniWallet
 
 
-# BIP9 constants for regtest
-BIP9_PERIOD = 144  # blocks per period in regtest
-BIP9_THRESHOLD = 108  # 75% of 144
-VERSIONBITS_TOP_BITS = 0x20000000
-REDUCED_DATA_BIT = 4
+# RDTS flag day. Algo 1 (SHA256d) keeps the PoW side of the hardfork inert;
+# only the RDTS rules flip at FORK_TIME. Effectively-permanent expiry.
+FORK_TIME = 1_500_000_000
+EXPIRY_TIME = 9_999_999_999
+# Setup blocks are mined at this mocktime. MTP creep (+1/block once block times
+# stall at the mocktime) stays far below FORK_TIME for the block counts here.
+START_TIME = FORK_TIME - 10_000
+RDTS_ARGS = [f'-powchangetime={FORK_TIME}:1', f'-rdtsexpiry={EXPIRY_TIME}']
 
 # REDUCED_DATA enforces MAX_SCRIPT_ELEMENT_SIZE_REDUCED (256) instead of MAX_SCRIPT_ELEMENT_SIZE (520)
 MAX_ELEMENT_SIZE_STANDARD = 520
@@ -64,14 +67,7 @@ class ReducedDataUTXOHeightTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        # Activate REDUCED_DATA using BIP9 with min_activation_height=288
-        # Due to BIP9 design, period 0 is always DEFINED, so signaling happens in period 1
-        # This activates at height 432 (start of period 3)
-        # Format: deployment:start:timeout:min_activation_height:max_activation_height:active_duration
-        # start_time=0, timeout=999999999999 (never), min_activation_height=288, max=2147483647 (INT_MAX, disabled), active_duration=2147483647 (permanent)
-        self.extra_args = [[
-            '-vbparams=reduced_data:0:999999999999:288:2147483647:2147483647',
-        ]]
+        self.extra_args = [RDTS_ARGS]
 
     def create_p2wsh_funding_and_spending_tx(self, wallet, node, witness_element_size):
         """Create a P2WSH output, then a transaction spending it with custom witness size.
@@ -115,24 +111,25 @@ class ReducedDataUTXOHeightTest(BitcoinTestFramework):
 
         return funding_tx, spending_tx
 
-    def create_test_block(self, txs, signal=False):
-        """Create a block with the given transactions."""
+    def create_test_block(self, txs, *, ntime=None):
+        """Create a block with the given transactions.
+
+        ntime pins the block's timestamp; default is tip time + 1, which stays
+        on the tip's side of the fork boundary."""
         # Always get fresh tip and height to ensure blocks chain correctly
         tip = self.nodes[0].getbestblockhash()
         height = self.nodes[0].getblockcount() + 1
         tip_header = self.nodes[0].getblockheader(tip)
-        block_time = tip_header['time'] + 1
+        block_time = ntime if ntime is not None else tip_header['time'] + 1
         block = create_block(int(tip, 16), create_coinbase(height), ntime=block_time, txlist=txs)
-        if signal:
-            block.nVersion = VERSIONBITS_TOP_BITS | (1 << REDUCED_DATA_BIT)
         add_witness_commitment(block)
         block.solve()
         return block
 
-    def mine_blocks(self, count, signal=False):
-        """Mine blocks with optional BIP9 signaling for REDUCED_DATA."""
-        for _ in range(count):
-            block = self.create_test_block([], signal=signal)
+    def mine_blocks(self, count, *, ntime=None):
+        """Mine empty blocks (only the first uses ntime; the rest follow the tip)."""
+        for i in range(count):
+            block = self.create_test_block([], ntime=ntime if i == 0 else None)
             result = self.nodes[0].submitblock(block.serialize().hex())
             if result is not None:
                 raise AssertionError(f"submitblock failed: {result}")
@@ -141,246 +138,147 @@ class ReducedDataUTXOHeightTest(BitcoinTestFramework):
 
     def run_test(self):
         node = self.nodes[0]
-        self.peer = node.add_p2p_connection(P2PDataStore())
 
         # Use MiniWallet for easy UTXO management
         wallet = MiniWallet(node)
 
-        self.log.info("Mining blocks to activate REDUCED_DATA via BIP9...")
-
-        # BIP9 state timeline with start_time=0:
-        # - Period 0 (blocks 0-143): DEFINED (cannot signal yet)
-        # - Period 1 (blocks 144-287): STARTED (signal here with 108/144 threshold)
-        # - Period 2 (blocks 288-431): LOCKED_IN (if threshold met in period 1)
-        # - Period 3 (blocks 432-575): ACTIVE
-
-        # Mine through period 0 (DEFINED state)
-        self.log.info("Mining through period 0 (DEFINED)...")
-        self.generate(wallet, 144)
-        self.log.info(f"DEBUG: After period 0, height = {node.getblockcount()}")
-
-        # Mine 108 signaling blocks in period 1 (STARTED state)
-        self.log.info("Mining 108 signaling blocks in period 1 (blocks 144-251)...")
-        self.mine_blocks(108, signal=True)
-        self.log.info(f"DEBUG: After 108 signaling blocks, height = {node.getblockcount()}")
-
-        # Mine to end of period 1 (block 287)
-        self.log.info("Mining to end of period 1 (block 287)...")
-        self.mine_blocks(287 - 144 - 108, signal=False)
-        self.log.info(f"DEBUG: After period 1, height = {node.getblockcount()}")
-
-        # Check that we're LOCKED_IN at start of period 2
-        self.generate(wallet, 1)  # Mine block 288
-        self.log.info(f"DEBUG: After mining block 288, height = {node.getblockcount()}")
-        deployment_info = node.getdeploymentinfo()
-        rd_info = deployment_info['deployments']['reduced_data']
-        if 'bip9' in rd_info:
-            status = rd_info['bip9']['status']
-            self.log.info(f"At height {node.getblockcount()}, REDUCED_DATA status: {status}")
-            assert status == 'locked_in', f"Expected LOCKED_IN at block 288, got {status}"
-        else:
-            raise AssertionError("REDUCED_DATA deployment not found")
-
-        # Mine to block 432 (start of period 3) where activation occurs
-        self.log.info("Mining to block 432 for activation...")
-        self.generate(wallet, 432 - 288)
-
-        current_height = node.getblockcount()
-
-        # Check activation status
-        deployment_info = node.getdeploymentinfo()
-        rd_info = deployment_info['deployments']['reduced_data']
-        if 'bip9' in rd_info:
-            status = rd_info['bip9']['status']
-            self.log.info(f"At height {current_height}, REDUCED_DATA status: {status}")
-            if status == 'active':
-                ACTIVATION_HEIGHT = rd_info['bip9']['since']
-            else:
-                raise AssertionError(f"REDUCED_DATA not active at height {current_height}, status: {status}")
-        else:
-            raise AssertionError("REDUCED_DATA deployment not found")
-
-        self.log.info(f"✓ REDUCED_DATA activated at height {ACTIVATION_HEIGHT}")
-        assert ACTIVATION_HEIGHT == 432, f"Expected activation at 432, got {ACTIVATION_HEIGHT}"
-
-        # Initialize wallet with some coins
-        self.generate(wallet, COINBASE_MATURITY + 10)
-        current_height = node.getblockcount()
-
-        # Now rewind to before activation to create test UTXOs
-        # Save the tip so we can restore later
-        activation_tip = node.getbestblockhash()
-
-        # Rewind to 20 blocks before activation
-        target_height = ACTIVATION_HEIGHT - 20
-        blocks_to_invalidate = current_height - target_height
-        self.log.info(f"Rewinding {blocks_to_invalidate} blocks to height {target_height}...")
-        for _ in range(blocks_to_invalidate):
-            node.invalidateblock(node.getbestblockhash())
-
-        assert_equal(node.getblockcount(), target_height)
+        # All setup blocks are pre-fork: their nTime is START_TIME (< FORK_TIME).
+        node.setmocktime(START_TIME)
+        self.log.info(f"Mining pre-fork setup blocks at mocktime {START_TIME}...")
+        self.generate(wallet, COINBASE_MATURITY + 30)
+        assert node.getblockheader(node.getbestblockhash())['time'] < FORK_TIME
 
         # ======================================================================
-        # Test 1: Create OLD UTXO before activation
+        # Test 1: Create OLD UTXO before the fork
         # ======================================================================
-        self.log.info("Test 1: Creating P2WSH UTXO before activation height...")
+        self.log.info("Test 1: Creating P2WSH UTXO before the fork time...")
 
-        # Create P2WSH funding transaction for old UTXO
         old_funding_tx, old_spending_tx = self.create_p2wsh_funding_and_spending_tx(
             wallet, node, VIOLATION_SIZE
         )
-
-        # Confirm the funding transaction in a block
-        block = self.create_test_block([old_funding_tx], signal=False)
-        node.submitblock(block.serialize().hex())
-        old_utxo_height = node.getblockcount()
-
-        self.log.info(f"Created old P2WSH UTXO at height {old_utxo_height} (< {ACTIVATION_HEIGHT})")
+        block = self.create_test_block([old_funding_tx])
+        assert_equal(node.submitblock(block.serialize().hex()), None)
+        old_utxo_time = node.getblockheader(node.getbestblockhash())['time']
+        assert old_utxo_time < FORK_TIME
+        self.log.info(f"Created old P2WSH UTXO in block with nTime {old_utxo_time} (< {FORK_TIME})")
 
         # ======================================================================
-        # Test 2: Mine to activation height
+        # Test 2: Cross the fork
         # ======================================================================
-        self.log.info("Test 2: Mining to activation height...")
-
-        current_height = node.getblockcount()
-        blocks_to_activation = ACTIVATION_HEIGHT - current_height
-        if blocks_to_activation > 0:
-            self.mine_blocks(blocks_to_activation, signal=False)
-
-        current_height = node.getblockcount()
-        assert_equal(current_height, ACTIVATION_HEIGHT)
-        self.log.info(f"At activation height: {current_height}")
-
-        # Verify REDUCED_DATA is active
-        deployment_info = node.getdeploymentinfo()
-        rd_info = deployment_info['deployments']['reduced_data']
-        if 'bip9' in rd_info:
-            status = rd_info['bip9']['status']
-        else:
-            status = 'active' if rd_info.get('active') else 'unknown'
-        assert status == 'active', f"Expected 'active' at height {current_height}, got '{status}'"
+        self.log.info("Test 2: Mining the fork block (nTime == FORK_TIME)...")
+        node.setmocktime(FORK_TIME)
+        self.mine_blocks(1, ntime=FORK_TIME)
+        assert_equal(node.getblockheader(node.getbestblockhash())['time'], FORK_TIME)
 
         # ======================================================================
-        # Test 3: Create NEW UTXO at/after activation
+        # Test 3: Create NEW UTXO after the fork
         # ======================================================================
-        self.log.info("Test 3: Creating P2WSH UTXO at activation height...")
+        self.log.info("Test 3: Creating P2WSH UTXO after the fork...")
 
-        # Create P2WSH funding transaction for new UTXO
         new_funding_tx, new_spending_tx = self.create_p2wsh_funding_and_spending_tx(
             wallet, node, VIOLATION_SIZE
         )
-
-        # Confirm the funding transaction in a block
-        block = self.create_test_block([new_funding_tx], signal=False)
-        node.submitblock(block.serialize().hex())
-        new_utxo_height = node.getblockcount()
-
-        self.log.info(f"Created new P2WSH UTXO at height {new_utxo_height} (>= {ACTIVATION_HEIGHT})")
+        block = self.create_test_block([new_funding_tx])
+        assert_equal(node.submitblock(block.serialize().hex()), None)
+        new_utxo_time = node.getblockheader(node.getbestblockhash())['time']
+        assert new_utxo_time >= FORK_TIME
+        self.log.info(f"Created new P2WSH UTXO in block with nTime {new_utxo_time} (>= {FORK_TIME})")
 
         # Mine a few more blocks
-        self.mine_blocks(5, signal=False)
-        current_height = node.getblockcount()
-        self.log.info(f"Current height: {current_height}")
+        self.mine_blocks(5)
 
         # ======================================================================
         # Test 4: Spend OLD UTXO with oversized witness - should be ACCEPTED
         # ======================================================================
-        self.log.info(f"Test 4: Spending old UTXO (height {old_utxo_height}) with {VIOLATION_SIZE}-byte witness element...")
-        self.log.info(f"        This violates REDUCED_DATA ({MAX_ELEMENT_SIZE_REDUCED} limit) but old UTXOs should be EXEMPT")
+        self.log.info(f"Test 4: Spending old (pre-fork) UTXO with {VIOLATION_SIZE}-byte witness element...")
+        self.log.info(f"        This violates REDUCED_DATA ({MAX_ELEMENT_SIZE_REDUCED} limit) but pre-fork coins are EXEMPT")
 
-        # Try to mine block with old_spending_tx (has 300-byte witness element)
-        block = self.create_test_block([old_spending_tx], signal=False)
+        block = self.create_test_block([old_spending_tx])
         result = node.submitblock(block.serialize().hex())
         assert result is None, f"Expected success, got: {result}"
 
-        self.log.info(f"✓ SUCCESS: Old UTXO with {VIOLATION_SIZE}-byte witness element was ACCEPTED (correctly exempt)")
+        self.log.info(f"✓ SUCCESS: Pre-fork UTXO with {VIOLATION_SIZE}-byte witness element was ACCEPTED (correctly exempt)")
 
         # ======================================================================
         # Test 5: Spend NEW UTXO with oversized witness - should be REJECTED
         # ======================================================================
-        self.log.info(f"Test 5: Spending new UTXO (height {new_utxo_height}) with {VIOLATION_SIZE}-byte witness element...")
-        self.log.info(f"        This violates REDUCED_DATA ({MAX_ELEMENT_SIZE_REDUCED} limit) and should be REJECTED")
+        self.log.info(f"Test 5: Spending new (post-fork) UTXO with {VIOLATION_SIZE}-byte witness element...")
 
-        # Try to mine block with new_spending_tx (has 300-byte witness element)
-        block = self.create_test_block([new_spending_tx], signal=False)
+        block = self.create_test_block([new_spending_tx])
         result = node.submitblock(block.serialize().hex())
         assert result is not None and 'mandatory-script-verify-flag-failed' in result, f"Expected rejection, got: {result}"
 
-        self.log.info(f"✓ SUCCESS: New UTXO with {VIOLATION_SIZE}-byte witness element was REJECTED (correctly enforced)")
+        self.log.info(f"✓ SUCCESS: Post-fork UTXO with {VIOLATION_SIZE}-byte witness element was REJECTED (correctly enforced)")
+
+        def rewind_to(height):
+            # Height-based loop: invalidating one tip can switch to an alternate branch at same height.
+            while node.getblockcount() > height:
+                node.invalidateblock(node.getbestblockhash())
+            assert_equal(node.getblockcount(), height)
 
         # ======================================================================
-        # Test 6: Boundary test - UTXO at exactly ReducedDataHeightBegin
+        # Test 6: Boundary - the exemption pins to nTime < FORK_TIME exactly
         # ======================================================================
-        self.log.info(f"Test 6: Boundary test - verifying UTXO at activation height {ACTIVATION_HEIGHT}...")
+        self.log.info("Test 6: Boundary test - coins created at FORK_TIME - 1 vs FORK_TIME...")
 
-        # The new_funding_tx was confirmed at height ACTIVATION_HEIGHT+1, but let's create one AT height ACTIVATION_HEIGHT
-        # First, invalidate back to height ACTIVATION_HEIGHT-1
-        current_tip = node.getbestblockhash()
-        blocks_to_invalidate = node.getblockcount() - (ACTIVATION_HEIGHT - 1)
-        for _ in range(blocks_to_invalidate):
-            node.invalidateblock(node.getbestblockhash())
+        post_fork_tip = node.getbestblockhash()
+        pre_fork_height = COINBASE_MATURITY + 31  # last setup block + test-1 funding block
+        rewind_to(pre_fork_height)
+        assert node.getblockheader(node.getbestblockhash())['time'] < FORK_TIME
 
-        assert_equal(node.getblockcount(), ACTIVATION_HEIGHT - 1)
-        self.log.info(f"        Rewound to height {node.getblockcount()}")
+        # Coin created in the LAST possible pre-fork block (nTime == FORK_TIME - 1).
+        last_funding_tx, last_spending_tx = self.create_p2wsh_funding_and_spending_tx(
+            wallet, node, VIOLATION_SIZE
+        )
+        block = self.create_test_block([last_funding_tx], ntime=FORK_TIME - 1)
+        assert_equal(node.submitblock(block.serialize().hex()), None)
+        # Cross the fork, then spend it: exempt.
+        self.mine_blocks(1, ntime=FORK_TIME)
+        block = self.create_test_block([last_spending_tx])
+        result = node.submitblock(block.serialize().hex())
+        assert result is None, f"Expected success for FORK_TIME - 1 coin, got: {result}"
+        self.log.info("        ✓ Coin created at nTime FORK_TIME - 1 is EXEMPT")
 
-        # Create UTXO exactly at activation height
+        rewind_to(pre_fork_height)
+        # The same coin created in the FIRST post-fork block (nTime == FORK_TIME): subject.
         boundary_funding_tx, boundary_spending_tx = self.create_p2wsh_funding_and_spending_tx(
             wallet, node, VIOLATION_SIZE
         )
-        block = self.create_test_block([boundary_funding_tx], signal=False)
-        result = node.submitblock(block.serialize().hex())
-        assert result is None, f"Expected success, got: {result}"
-        boundary_height = node.getblockcount()
-        assert_equal(boundary_height, ACTIVATION_HEIGHT)
-
-        self.log.info(f"        Created boundary UTXO at height {boundary_height} (exactly at activation)")
-
-        # Mine a few blocks past activation
-        self.mine_blocks(5, signal=False)
-
-        # Try to spend boundary UTXO - should be REJECTED (height ACTIVATION_HEIGHT >= ACTIVATION_HEIGHT)
-        self.log.info(f"        Spending boundary UTXO with {VIOLATION_SIZE}-byte witness (should be REJECTED)")
-        block = self.create_test_block([boundary_spending_tx], signal=False)
+        block = self.create_test_block([boundary_funding_tx], ntime=FORK_TIME)
+        assert_equal(node.submitblock(block.serialize().hex()), None)
+        self.mine_blocks(2)
+        block = self.create_test_block([boundary_spending_tx])
         result = node.submitblock(block.serialize().hex())
         assert result is not None and 'mandatory-script-verify-flag-failed' in result, f"Expected rejection, got: {result}"
+        self.log.info("        ✓ Coin created at nTime FORK_TIME is SUBJECT to rules (boundary is >=, not >)")
 
-        self.log.info(f"✓ SUCCESS: UTXO at exactly activation height {ACTIVATION_HEIGHT} is SUBJECT to rules (not exempt)")
-
-        # Restore chain to where we were
-        node.reconsiderblock(current_tip)
+        # Restore the main chain.
+        node.reconsiderblock(post_fork_tip)
 
         # ======================================================================
         # Test 7: Mixed inputs - one old (exempt) + one new (subject to rules)
         # ======================================================================
-        self.log.info("Test 7: Creating transaction with mixed inputs (old + new UTXOs)...")
+        self.log.info("Test 7: Creating transaction with mixed inputs (pre-fork + post-fork UTXOs)...")
 
-        # We need fresh old and new UTXOs. Rewind to before activation again
         current_tip2 = node.getbestblockhash()
-        blocks_to_invalidate = node.getblockcount() - (ACTIVATION_HEIGHT - 20)
-        for _ in range(blocks_to_invalidate):
-            node.invalidateblock(node.getbestblockhash())
+        rewind_to(pre_fork_height)
 
-        # Create OLD UTXO at height before activation
-        old_mixed_funding, old_mixed_spending = self.create_p2wsh_funding_and_spending_tx(
+        # Create OLD UTXO pre-fork
+        old_mixed_funding, _old_mixed_spending = self.create_p2wsh_funding_and_spending_tx(
             wallet, node, VIOLATION_SIZE
         )
-        block = self.create_test_block([old_mixed_funding], signal=False)
-        node.submitblock(block.serialize().hex())
-        old_mixed_height = node.getblockcount()
-        self.log.info(f"        Created old UTXO at height {old_mixed_height}")
+        block = self.create_test_block([old_mixed_funding])
+        assert_equal(node.submitblock(block.serialize().hex()), None)
+        old_mixed_time = node.getblockheader(node.getbestblockhash())['time']
 
-        # Mine to after activation
-        blocks_to_mine = ACTIVATION_HEIGHT - node.getblockcount() + 5
-        self.mine_blocks(blocks_to_mine, signal=False)
-
-        # Create NEW UTXO at height after activation
-        new_mixed_funding, new_mixed_spending = self.create_p2wsh_funding_and_spending_tx(
+        # Cross the fork and create NEW UTXO post-fork
+        self.mine_blocks(1, ntime=FORK_TIME)
+        new_mixed_funding, _new_mixed_spending = self.create_p2wsh_funding_and_spending_tx(
             wallet, node, VIOLATION_SIZE
         )
-        block = self.create_test_block([new_mixed_funding], signal=False)
-        node.submitblock(block.serialize().hex())
-        new_mixed_height = node.getblockcount()
-        self.log.info(f"        Created new UTXO at height {new_mixed_height}")
+        block = self.create_test_block([new_mixed_funding])
+        assert_equal(node.submitblock(block.serialize().hex()), None)
+        new_mixed_time = node.getblockheader(node.getbestblockhash())['time']
 
         # Find P2WSH outputs in funding transactions
         witness_script = CScript([OP_DROP, OP_TRUE])
@@ -423,12 +321,12 @@ class ReducedDataUTXOHeightTest(BitcoinTestFramework):
 
         mixed_tx.rehash()
 
-        self.log.info(f"        Mixed tx: old UTXO (height {old_mixed_height}, exempt) + new UTXO (height {new_mixed_height}, subject)")
+        self.log.info(f"        Mixed tx: old UTXO (nTime {old_mixed_time}, exempt) + new UTXO (nTime {new_mixed_time}, subject)")
         self.log.info(f"        Both inputs have {VIOLATION_SIZE}-byte witness elements")
 
         # Try to mine block - should REJECT because new input violates
-        self.mine_blocks(2, signal=False)
-        block = self.create_test_block([mixed_tx], signal=False)
+        self.mine_blocks(2)
+        block = self.create_test_block([mixed_tx])
         result = node.submitblock(block.serialize().hex())
         assert result is not None and 'mandatory-script-verify-flag-failed' in result, f"Expected rejection, got: {result}"
 
@@ -438,81 +336,70 @@ class ReducedDataUTXOHeightTest(BitcoinTestFramework):
         node.reconsiderblock(current_tip2)
 
         # ======================================================================
-        # Test 8: cache state must not survive activation-boundary reorg
+        # Test 8: reorg across the fork boundary - per-branch verdicts, no
+        # script-execution cache leakage between branches
         # ======================================================================
-        self.log.info("Test 8: script-execution cache must not survive boundary-context flip")
+        self.log.info("Test 8: same coin judged per-branch across a fork-boundary reorg")
 
-        def rewind_to(height):
-            # Height-based loop: invalidating one tip can switch to an alternate branch at same height.
-            while node.getblockcount() > height:
-                node.invalidateblock(node.getbestblockhash())
-            assert_equal(node.getblockcount(), height)
+        rewind_to(pre_fork_height)
 
-        branch_point = ACTIVATION_HEIGHT - 2  # 430
-        rewind_to(branch_point)
-
-        # spend_tx has a 300-byte witness element: valid only with pre-activation exemption.
+        # spend_tx has a 300-byte witness element: valid only via the pre-fork exemption.
         funding_tx, spend_tx = self.create_p2wsh_funding_and_spending_tx(wallet, node, VIOLATION_SIZE)
 
-        # Branch A: funding at 431 (exempt).
-        block = self.create_test_block([funding_tx], signal=False)
+        # Branch A: funding block is the last pre-fork block (exempt coin).
+        block = self.create_test_block([funding_tx], ntime=FORK_TIME - 1)
         assert_equal(node.submitblock(block.serialize().hex()), None)
-        assert_equal(node.getblockcount(), ACTIVATION_HEIGHT - 1)
+        branch_height = node.getblockcount()
 
-        self.restart_node(0, extra_args=['-vbparams=reduced_data:0:999999999999:288:2147483647:2147483647', '-par=1'])  # Use single-threaded validation to maximize chance of hitting cache-related issues.
+        self.restart_node(0, extra_args=RDTS_ARGS + ['-par=1'])  # Single-threaded validation to maximize chance of hitting cache-related issues.
+        node.setmocktime(FORK_TIME + 100)
 
-        # Validate-only block at height 432. This calls TestBlockValidity(fJustCheck=true),
-        # which populates the tx-wide script-execution cache under STRICT flags, even though
-        # the spend is only valid here due to the per-input "pre-activation UTXO" exemption.
+        # Validate-only block on top (post-fork context). This calls
+        # TestBlockValidity(fJustCheck=true): the spend passes only via the
+        # per-input exemption, and must not poison the tx-wide script cache.
         self.generateblock(node, output=wallet.get_address(), transactions=[spend_tx.serialize().hex()], submit=False, sync_fun=self.no_op)
+        assert_equal(node.getblockcount(), branch_height)
 
-        assert_equal(node.getblockcount(), ACTIVATION_HEIGHT - 1)
+        # Reorg to the branch point; cache state is intentionally retained.
+        rewind_to(pre_fork_height)
 
-        # Reorg to branch point; cache state is intentionally retained across reorg.
-        rewind_to(branch_point)
+        # Branch B: the SAME funding tx at the SAME height, but the block's
+        # nTime is FORK_TIME: on this branch the coin is post-fork.
+        block = self.create_test_block([funding_tx], ntime=FORK_TIME)
+        assert_equal(node.submitblock(block.serialize().hex()), None)
+        assert_equal(node.getblockcount(), branch_height)
 
-        # Branch B: funding at 432 (non-exempt).
-        # Make this empty block unique to avoid duplicate-invalid when rebuilding branch B.
-        block = self.create_test_block([], signal=False)
-        block.nTime += 1
-        block.solve()
-        assert_equal(node.submitblock(block.serialize().hex()), None)  # 431
-        block = self.create_test_block([funding_tx], signal=False)
-        assert_equal(node.submitblock(block.serialize().hex()), None)  # 432
-
-        # Same spend is now non-exempt and must be rejected.
-        attack_block = self.create_test_block([spend_tx], signal=False)  # 433
+        # The same spend is now non-exempt and must be rejected.
+        attack_block = self.create_test_block([spend_tx])
         result = node.submitblock(attack_block.serialize().hex())
         assert result is not None and 'Push value size limit exceeded' in result, \
             f"Expected rejection after boundary-crossing reorg, got: {result}"
 
-        self.log.info("✓ SUCCESS: Cache poisoning via activation-boundary reorg correctly prevented")
+        self.log.info("✓ SUCCESS: Per-branch fork-boundary verdicts enforced; no cache poisoning")
 
         # ======================================================================
         # Summary
         # ======================================================================
         self.log.info(f"""
         ============================================================
-        TEST SUMMARY - UTXO Height-Based REDUCED_DATA Enforcement
+        TEST SUMMARY - Flag-Day REDUCED_DATA Grandfathering
         ============================================================
 
-        ✓ Test 1-3: Setup old and new UTXOs at correct heights
-        ✓ Test 4: Old UTXO (height < {ACTIVATION_HEIGHT}) is EXEMPT - 300-byte witness ACCEPTED
-        ✓ Test 5: New UTXO (height >= {ACTIVATION_HEIGHT}) is SUBJECT - 300-byte witness REJECTED
-        ✓ Test 6: Boundary condition - UTXO at exactly height {ACTIVATION_HEIGHT} is SUBJECT
+        ✓ Test 1-3: Pre-fork and post-fork P2WSH UTXOs created
+        ✓ Test 4: Pre-fork coin is EXEMPT - 300-byte witness ACCEPTED
+        ✓ Test 5: Post-fork coin is SUBJECT - 300-byte witness REJECTED
+        ✓ Test 6: Boundary pins to the creating block's nTime:
+                  FORK_TIME - 1 exempt, FORK_TIME subject (>= not >)
         ✓ Test 7: Mixed inputs - transaction rejected if ANY input violates
-        ✓ Test 8: Cache poisoning via activation-boundary reorg prevented
+        ✓ Test 8: Same coin, same height, different branch times:
+                  per-branch verdicts, no cache poisoning across the reorg
 
         Key validations:
-        • REDUCED_DATA activated via BIP9 signaling at height {ACTIVATION_HEIGHT}
-        • UTXOs created before activation height are EXEMPT from rules
-        • UTXOs created at/after activation height are SUBJECT to rules
+        • RDTS active for blocks with nTime in [powchangetime, rdtsexpiry)
+        • Coins created by pre-fork blocks are EXEMPT from rules
+        • Coins created by post-fork blocks are SUBJECT to rules
         • Per-input validation flags work correctly (validation.cpp)
-        • Boundary at activation height uses >= operator (not >)
-
-        This confirms the implementation of UTXO height exemption:
-        "Exempt inputs spending UTXOs prior to ReducedDataHeightBegin from
-        reduced_data script validation rules"
+        • Exemption derives from the creating block on THIS branch
 
         All 8 tests passed!
         ============================================================

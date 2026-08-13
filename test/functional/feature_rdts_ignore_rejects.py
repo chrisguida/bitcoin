@@ -42,11 +42,11 @@ from test_framework.wallet import MiniWallet
 # ConsensusScriptChecks' "policy passed but consensus failed" alarm.
 BUG_MSG = "BUG! PLEASE REPORT THIS!"
 
-# Start immediately and expire active_duration (144) blocks after activating, so
-# the deployment runs the real DEFINED -> ... -> ACTIVE -> EXPIRED path.
-VBPARAMS = "-vbparams=reduced_data:0:999999999999:0:2147483647:144"
-ACTIVATION_HEIGHT = 432
-EXPIRY_HEIGHT = ACTIVATION_HEIGHT + 144
+# RDTS flag day: rules apply to blocks with nTime in [FORK_TIME, EXPIRY_TIME).
+# Algo 1 (SHA256d) keeps the PoW side of the hardfork inert. Block times are
+# driven with setmocktime, mirroring feature_powchange.py.
+FORK_TIME = 1_500_000_000
+EXPIRY_TIME = FORK_TIME + 600_000
 
 # Violates SCRIPT_VERIFY_REDUCED_DATA itself, which only the broad token clears.
 TAPSCRIPT_OP_IF = CScript([OP_1, OP_IF, OP_1, OP_ENDIF])
@@ -71,7 +71,7 @@ class RdtsIgnoreRejectsTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [[VBPARAMS]]
+        self.extra_args = [[f"-powchangetime={FORK_TIME}:1", f"-rdtsexpiry={EXPIRY_TIME}"]]
 
     def fund_taproot_leaf(self, leaf_script):
         """Mine a Taproot output committing to leaf_script, and return a tx that
@@ -115,22 +115,38 @@ class RdtsIgnoreRejectsTest(BitcoinTestFramework):
             self.log.info(f"  {name} with ignore_rejects={ignore_rejects}: "
                           f"rejected ({result['reject-reason']})")
 
-    def deployment_status(self):
-        return self.nodes[0].getdeploymentinfo()['deployments']['reduced_data']['bip9']['status']
+    def assert_block_acceptance(self, tx, *, accepted):
+        """Mine a block containing tx; check consensus accepts or rejects it."""
+        node = self.nodes[0]
+        tip = node.getbestblockhash()
+        block = create_block(int(tip, 16), create_coinbase(node.getblockcount() + 1),
+                             node.getblockheader(tip)['time'] + 1)
+        block.vtx.append(tx)
+        add_witness_commitment(block)
+        block.solve()
+        result = node.submitblock(block.serialize().hex())
+        if accepted:
+            assert_equal(result, None)
+        else:
+            assert result is not None and 'mandatory-script-verify-flag-failed' in result, result
 
     def run_test(self):
         node = self.nodes[0]
         self.wallet = MiniWallet(node)
+        # All block times from here sit in [FORK_TIME, EXPIRY_TIME): RDTS active.
+        node.setmocktime(FORK_TIME)
         self.generate(self.wallet, 110)  # coinbase maturity
 
-        self.generate(self.wallet, ACTIVATION_HEIGHT + 8 - node.getblockcount())
-        assert_equal(self.deployment_status(), 'active')
-        self.log.info(f"Deployment active at height {node.getblockcount()}")
+        self.log.info("RDTS active: a violating spend is rejected at the block level")
+        self.assert_block_acceptance(self.fund_taproot_leaf(TAPSCRIPT_OP_IF), accepted=False)
         self.check_all_rejected()
 
-        self.generate(self.wallet, EXPIRY_HEIGHT + 6 - node.getblockcount())
-        assert_equal(self.deployment_status(), 'expired')
-        self.log.info(f"Deployment expired at height {node.getblockcount()}")
+        # Cross the expiry: the next block's time is past EXPIRY_TIME.
+        node.setmocktime(EXPIRY_TIME + 3600)
+        self.generate(self.wallet, 1)
+        self.log.info("RDTS expired: the same spend is consensus-valid in a block")
+        self.assert_block_acceptance(self.fund_taproot_leaf(TAPSCRIPT_OP_IF), accepted=True)
+        self.log.info("...but ignore_rejects still cannot relax the flags in the mempool")
         self.check_all_rejected()
 
         self.log.info("Genuinely policy-only flags are still ignorable")
