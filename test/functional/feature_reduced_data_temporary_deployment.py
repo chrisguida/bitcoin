@@ -103,6 +103,18 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         assert_equal(bool(tmpl['vbrequired'] & (1 << REDUCED_DATA_BIT)), signalling)
         assert_equal(bool(tmpl['version'] & (1 << REDUCED_DATA_BIT)), signalling)
 
+    def assert_rdts_deploymentinfo(self, node, *, active, must_signal):
+        """Check the reduced_data flag-day entry in getdeploymentinfo."""
+        rd = node.getdeploymentinfo()['deployments']['reduced_data']
+        assert_equal(rd['type'], 'flagday')
+        assert_equal(rd['active'], active)
+        assert_equal(rd['start_time'], FORK_TIME)
+        assert_equal(rd['expiry_time'], EXPIRY_TIME)
+        assert_equal(rd['signal_window']['bit'], REDUCED_DATA_BIT)
+        assert_equal(rd['signal_window']['begin'], 50)
+        assert_equal(rd['signal_window']['end'], SIGNAL_WINDOW_END)
+        assert_equal(rd['signal_window']['next_block_must_signal'], must_signal)
+
     def create_tx_with_large_output(self, wallet):
         """Create a transaction with 84-byte OP_RETURN (violates BIP-110's 83-byte limit)."""
         tx_dict = wallet.create_self_transfer()
@@ -141,6 +153,9 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
 
         # GBT pre-fork, in the window: signalling advertised, rules not yet.
         self.assert_gbt_rdts(node_bip110, signalling=True, active=False)
+        self.assert_rdts_deploymentinfo(node_bip110, active=False, must_signal=True)
+        # The no-flag-day node reports no reduced_data entry at all.
+        assert 'reduced_data' not in node_core.getdeploymentinfo()['deployments']
 
         # =====================================================================
         # Phase 2: Cross the fork; test enforcement and chain split
@@ -168,6 +183,7 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         # window, deliberate over-signalling), while the rules entry follows
         # the template time.
         self.assert_gbt_rdts(node_bip110, signalling=True, active=True)
+        self.assert_rdts_deploymentinfo(node_bip110, active=True, must_signal=False)
 
         # Disconnect nodes BEFORE creating invalid block to prevent P2P relay
         # (Bitcoin Core relays blocks via compact blocks before full validation completes)
@@ -290,12 +306,14 @@ class TemporaryDeploymentTest(BitcoinTestFramework):
         # the height is inside the window (height-only, deliberate).
         assert node_bip110.getblockcount() + 1 < SIGNAL_WINDOW_END
         self.assert_gbt_rdts(node_bip110, signalling=True, active=False)
+        self.assert_rdts_deploymentinfo(node_bip110, active=False, must_signal=False)
 
         # Past the window's end, the signalling advertisement stops too.
         while node_bip110.getblockcount() + 1 < SIGNAL_WINDOW_END:
             self.mine_blocks_on_node(node_bip110, 1)
         self.sync_all()
         self.assert_gbt_rdts(node_bip110, signalling=False, active=False)
+
 
         # =====================================================================
         # Summary

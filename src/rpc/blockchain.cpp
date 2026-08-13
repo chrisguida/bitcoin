@@ -1861,10 +1861,19 @@ RPCHelpMan getblockchaininfo()
 
 namespace {
 const std::vector<RPCResult> RPCHelpForDeployment{
-    {RPCResult::Type::STR, "type", "one of \"buried\", \"bip9\""},
+    {RPCResult::Type::STR, "type", "one of \"buried\", \"bip9\", \"flagday\""},
     {RPCResult::Type::NUM, "height", /*optional=*/true, "height of the first block which enforces the rules (only for \"buried\" type, or \"bip9\" type with \"active\" status)"},
     {RPCResult::Type::NUM, "height_end", /*optional=*/true, "height of the last block which enforces the rules (only for \"bip9\" type with \"active\" status and temporary deployments)"},
-    {RPCResult::Type::BOOL, "active", "true if the rules are enforced for the mempool and the next block"},
+    {RPCResult::Type::BOOL, "active", "true if the rules are enforced for the mempool and the next block; for \"flagday\", whether the rules are enforced at the queried block (they apply to blocks with time in [start_time, expiry_time))"},
+    {RPCResult::Type::NUM_TIME, "start_time", /*optional=*/true, "block time at and after which the rules are enforced (only for \"flagday\" type; this is the PoW-change hardfork time)"},
+    {RPCResult::Type::NUM_TIME, "expiry_time", /*optional=*/true, "block time at and after which the rules are no longer enforced (only for \"flagday\" type)"},
+    {RPCResult::Type::OBJ, "signal_window", /*optional=*/true, "the mandatory-signalling window (only for \"flagday\" type, when configured)",
+    {
+        {RPCResult::Type::NUM, "bit", "the bit (0-28) in the block version field that must be set"},
+        {RPCResult::Type::NUM, "begin", "first height at which signalling is required"},
+        {RPCResult::Type::NUM, "end", "first height at which signalling is no longer required (the fork time also ends the requirement early)"},
+        {RPCResult::Type::BOOL, "next_block_must_signal", "whether a block built on the queried block with a pre-fork time must signal"},
+    }},
     {RPCResult::Type::OBJ, "bip9", /*optional=*/true, "status of bip9 softforks (only for \"bip9\" type)",
     {
         {RPCResult::Type::NUM, "bit", /*optional=*/true, "the bit (0-28) in the block version field used to signal this softfork (only for \"started\" and \"locked_in\" status)"},
@@ -1888,6 +1897,32 @@ const std::vector<RPCResult> RPCHelpForDeployment{
     }},
 };
 
+// RDTS flag day (not a versionbits deployment): rules apply to blocks with
+// nTime in [HardforkTime, RdtsExpiryTime). Reported as-of the queried block,
+// like the versionbits entries. Omitted entirely when unscheduled (plain
+// regtest), as NEVER_ACTIVE deployments are.
+void RdtsFlagDayDescPushBack(const CBlockIndex* blockindex, UniValue& softforks, const ChainstateManager& chainman)
+{
+    const Consensus::Params& params{chainman.GetConsensus()};
+    const bool window_configured{params.RdtsMustSignalBegin < params.RdtsMustSignalEnd};
+    if (params.RdtsExpiryTime <= params.HardforkTime && !window_configured) return;
+
+    UniValue rv(UniValue::VOBJ);
+    rv.pushKV("type", "flagday");
+    rv.pushKV("start_time", params.HardforkTime);
+    rv.pushKV("expiry_time", params.RdtsExpiryTime);
+    if (window_configured) {
+        UniValue sw(UniValue::VOBJ);
+        sw.pushKV("bit", Consensus::RDTS_SIGNAL_BIT);
+        sw.pushKV("begin", params.RdtsMustSignalBegin);
+        sw.pushKV("end", params.RdtsMustSignalEnd);
+        sw.pushKV("next_block_must_signal", params.RdtsMustSignalAt(blockindex->nHeight + 1, blockindex->GetBlockTime()));
+        rv.pushKV("signal_window", std::move(sw));
+    }
+    rv.pushKV("active", params.RdtsActiveAtTime(blockindex->GetBlockTime()));
+    softforks.pushKV("reduced_data", std::move(rv));
+}
+
 UniValue DeploymentInfo(const CBlockIndex* blockindex, const ChainstateManager& chainman)
 {
     UniValue softforks(UniValue::VOBJ);
@@ -1898,8 +1933,7 @@ UniValue DeploymentInfo(const CBlockIndex* blockindex, const ChainstateManager& 
     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_SEGWIT);
     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TESTDUMMY);
     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TAPROOT);
-    // RDTS is a flag day, not a versionbits deployment; its reporting is added
-    // separately (see the reduced_data flag-day entry).
+    RdtsFlagDayDescPushBack(blockindex, softforks, chainman);
     return softforks;
 }
 } // anon namespace
