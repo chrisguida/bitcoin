@@ -2350,6 +2350,15 @@ void CConnman::ThreadDNSAddressSeed()
         // This will occur on the first run, or if peers.dat has been
         // deleted.
         seeds_right_now = seeds.size();
+    } else {
+        // Post-fork the header chain can only be completed through a NODE_BLAKE2B
+        // peer, so if addrman has no usable one, query DNS now instead of waiting
+        // DNSSEEDS_DELAY_MANY_PEERS. Not gated on activation height (deployment
+        // ships at/after the fork); filtered so dead entries don't suppress it.
+        const auto addrs{addrman.GetAddr(/*max_addresses=*/0, /*max_pct=*/0, /*network=*/std::nullopt, /*filtered=*/true)};
+        if (std::none_of(addrs.begin(), addrs.end(), [](const CAddress& a) { return a.nServices & NODE_BLAKE2B; })) {
+            seeds_right_now = seeds.size();
+        }
     }
 
     // Proceed with dnsseeds if seednodes hasn't reached the target or if forcednsseed is set
