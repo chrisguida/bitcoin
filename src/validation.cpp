@@ -2061,7 +2061,7 @@ void Chainstate::CheckForkWarningConditions()
     }
 }
 
-void Chainstate::CheckStuckOnInvalidBlock()
+void Chainstate::CheckStuckOnInvalidBlock(const CBlockIndex* rejected)
 {
     AssertLockHeld(cs_main);
 
@@ -2069,10 +2069,21 @@ void Chainstate::CheckStuckOnInvalidBlock()
     CBlockIndex* tip{m_chain.Tip()};
     if (tip == nullptr) return;
 
-    // Walk from the most-work invalid header down to the lowest block marked
-    // invalid on that branch. Only a block that builds directly on the tip
-    // holds the chain back; any other invalid branch is simply not followed.
-    const CBlockIndex* culprit{m_chainman.m_best_invalid};
+    // Walk from the rejected header down to the lowest block marked invalid on
+    // that branch. Only a block that builds directly on the tip holds the
+    // chain back; any other invalid branch is simply not followed.
+    const CBlockIndex* culprit{rejected};
+    if (culprit == nullptr) {
+        // No header to start from (startup): look for a failed child of the
+        // tip. m_best_invalid can sit on another, higher-work branch, and
+        // blocks rejected in AcceptBlock never reach it.
+        for (const auto& [_, index] : m_blockman.m_block_index) {
+            if (index.pprev == tip && (index.nStatus & BLOCK_FAILED_MASK)) {
+                culprit = &index;
+                break;
+            }
+        }
+    }
     while (culprit && culprit->pprev && (culprit->pprev->nStatus & BLOCK_FAILED_MASK)) {
         culprit = culprit->pprev;
     }
@@ -2085,7 +2096,16 @@ void Chainstate::CheckStuckOnInvalidBlock()
     const int height{culprit->nHeight};
     bilingual_str warning;
     CBlock block;
+    // An invalid block on a recent tip is ordinary (a soft fork, a broken
+    // miner); a valid sibling normally follows within minutes. Only a tip
+    // older than -maxtipage means the node is actually held back.
+    const bool tip_is_old{tip->Time() < Now<NodeSeconds>() - m_chainman.m_options.max_tip_age};
     if (!(culprit->nStatus & BLOCK_HAVE_DATA) || !m_blockman.ReadBlock(block, *culprit)) {
+        if (!tip_is_old) {
+            LogInfo("Block %s at height %d is marked invalid and its data is not available\n", hash.ToString(), height);
+            m_stuck_on_invalid_block.SetNull();
+            return;
+        }
         LogWarning("Block %s at height %d is marked invalid, so this node cannot advance past height %d, and its data is not available to check it again\n",
                    hash.ToString(), height, tip->nHeight);
         warning = strprintf(_("Warning: block %s at height %d is marked invalid; this node cannot advance past height %d."),
@@ -2100,6 +2120,11 @@ void Chainstate::CheckStuckOnInvalidBlock()
                        hash.ToString(), height, tip->nHeight, hash.ToString());
             warning = strprintf(_("Warning: block %s at height %d is marked invalid but passes validation; this node cannot advance past height %d. If the block should be accepted, run reconsiderblock %s."),
                                 hash.ToString(), height, tip->nHeight, hash.ToString());
+        } else if (!tip_is_old) {
+            LogInfo("Block %s at height %d is marked invalid and fails validation again (%s)\n",
+                    hash.ToString(), height, state.ToString());
+            m_stuck_on_invalid_block.SetNull();
+            return;
         } else {
             LogWarning("Block %s at height %d is marked invalid and fails validation again (%s), so this node cannot advance past height %d. If the block is known to be valid, the chain state may be damaged; -reindex-chainstate rebuilds it\n",
                        hash.ToString(), height, state.ToString(), tip->nHeight);

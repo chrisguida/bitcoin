@@ -97,7 +97,8 @@ class StuckOnInvalidBlockTest(BitcoinTestFramework):
         # The reason is rendered as "<reject reason>, <debug message>", so match its start.
         invalid_log = f"Block {bad_hash} at height {height} is marked invalid and fails validation again (bad-txns-inputs-missingorspent"
         with node1.assert_debug_log(expected_msgs=[invalid_log, f"so this node cannot advance past height {height - 1}. If the block is known to be valid, the chain state may be damaged; -reindex-chainstate rebuilds it"], unexpected_msgs=["reconsiderblock"]):
-            self.restart_node(1)
+            # Only a tip older than -maxtipage is held back; a fresh one expects a valid sibling.
+            self.restart_node(1, extra_args=[f"-mocktime={node1.getblock(tip)['time'] + 25 * 3600}"])
         warnings = self.stuck_warnings(node1)
         assert_equal(len(warnings), 1)
         assert "fails validation again (bad-txns-inputs-missingorspent" in warnings[0], warnings

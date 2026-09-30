@@ -738,7 +738,7 @@ public:
      * current rules and set a warning saying either how to accept it or why it
      * is still rejected. Reports each block once; cleared when the tip moves.
      */
-    void CheckStuckOnInvalidBlock() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void CheckStuckOnInvalidBlock(const CBlockIndex* rejected = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Replay blocks that aren't fully applied to the database. */
     bool ReplayBlocks();
