@@ -2126,8 +2126,10 @@ void Chainstate::CheckStuckOnInvalidBlock(const CBlockIndex* rejected)
             m_stuck_on_invalid_block.SetNull();
             return;
         } else {
-            LogWarning("Block %s at height %d is marked invalid and fails validation again (%s), so this node cannot advance past height %d. If the block is known to be valid, the chain state may be damaged; -reindex-chainstate rebuilds it\n",
-                       hash.ToString(), height, state.ToString(), tip->nHeight);
+            // A pruned node cannot use -reindex-chainstate; its only rebuild is -reindex, which downloads the chain again
+            const char* rebuild_advice{m_blockman.IsPruneMode() ? "-reindex rebuilds it (a pruned node downloads the chain again)" : "-reindex-chainstate rebuilds it"};
+            LogWarning("Block %s at height %d is marked invalid and fails validation again (%s), so this node cannot advance past height %d. If the block is known to be valid, the chain state may be damaged; %s\n",
+                       hash.ToString(), height, state.ToString(), tip->nHeight, rebuild_advice);
             warning = strprintf(_("Warning: block %s at height %d is marked invalid and fails validation again (%s); this node cannot advance past height %d."),
                                 hash.ToString(), height, state.ToString(), tip->nHeight);
         }
