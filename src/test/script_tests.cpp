@@ -1664,7 +1664,8 @@ static CScript MultiAScript(const int k, const int n, const size_t key_size = 32
 {
     CScript script{CScript() << std::vector<unsigned char>(key_size, 1) << OP_CHECKSIG};
     for (int i{1}; i < n; ++i) {
-        script << std::vector<unsigned char>(key_size, i + 1) << OP_CHECKSIGADD;
+        // the byte only has to vary between keys; past 255 it wraps
+        script << std::vector<unsigned char>(key_size, static_cast<unsigned char>(i + 1)) << OP_CHECKSIGADD;
     }
     return script << k << terminator;
 }
