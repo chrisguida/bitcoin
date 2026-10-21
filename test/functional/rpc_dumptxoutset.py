@@ -154,5 +154,9 @@ class DumptxoutsetTest(BitcoinTestFramework):
         self.log.info("Testing dumptxoutset with chain fork at target height")
         self.test_dumptxoutset_with_fork()
 
+        self.log.info("Test that bitcoin-cli passes the type positionally as a string")
+        out = node.cli.dumptxoutset('cli_latest.dat', 'latest')
+        assert_equal(out['base_height'], 100)
+
 if __name__ == '__main__':
     DumptxoutsetTest(__file__).main()
