@@ -2012,18 +2012,13 @@ void Chainstate::InitCoinsCache(size_t cache_size_bytes)
     m_coins_views->InitCache();
 }
 
-// Note that though this is marked const, we may end up modifying `m_cached_finished_ibd`, which
-// is a performance-related implementation detail. This function must be marked
-// `const` so that `CValidationInterface` clients (which are given a `const Chainstate*`)
-// can call it.
-//
 bool ChainstateManager::IsInitialBlockDownload() const
 {
-    // Optimization: pre-test latch before taking the lock.
-    if (m_cached_finished_ibd.load(std::memory_order_relaxed))
-        return false;
+    return !m_cached_finished_ibd.load(std::memory_order_relaxed);
+}
 
-    LOCK(cs_main);
+bool ChainstateManager::UpdateIBDStatus()
+{
     if (m_cached_finished_ibd.load(std::memory_order_relaxed))
         return false;
     if (m_blockman.LoadingBlocks()) {
@@ -3112,6 +3107,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     }
 
     m_chain.SetTip(*pindexDelete->pprev);
+    m_chainman.UpdateIBDStatus();
 
     UpdateTip(pindexDelete->pprev);
     // Let wallets know transactions went from 1-confirmed to
@@ -3240,6 +3236,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     }
     // Update m_chain & related variables.
     m_chain.SetTip(*pindexNew);
+    m_chainman.UpdateIBDStatus();
     UpdateTip(pindexNew);
 
     const auto time_6{SteadyClock::now()};
@@ -4706,7 +4703,7 @@ bool Chainstate::LoadChainTip()
     AssertLockHeld(cs_main);
     const CCoinsViewCache& coins_cache = CoinsTip();
     assert(!coins_cache.GetBestBlock().IsNull()); // Never called when the coins view is empty
-    const CBlockIndex* tip = m_chain.Tip();
+    CBlockIndex* tip = m_chain.Tip();
 
     if (tip && tip->GetBlockHash() == coins_cache.GetBestBlock()) {
         return true;
@@ -4718,6 +4715,19 @@ bool Chainstate::LoadChainTip()
         return false;
     }
     m_chain.SetTip(*pindex);
+    m_chainman.UpdateIBDStatus();
+    tip = m_chain.Tip();
+
+    // Make sure our chain tip before shutting down scores better than any other candidate
+    // to maintain a consistent best tip over reboots in case of a tie.
+    auto target = tip;
+    while (target) {
+        const bool is_candidate{setBlockIndexCandidates.contains(target)};
+        if (is_candidate) setBlockIndexCandidates.erase(tip);
+        target->nSequenceId = SEQ_ID_BEST_CHAIN_FROM_DISK;
+        if (is_candidate) setBlockIndexCandidates.insert(tip);
+        target = target->pprev;
+    }
     PruneBlockIndexCandidates();
 
     tip = m_chain.Tip();
@@ -5365,7 +5375,9 @@ void ChainstateManager::CheckBlockIndex()
                 }
             }
         }
-        if (!pindex->HaveNumChainTxs()) assert(pindex->nSequenceId <= 0); // nSequenceId can't be set positive for blocks that aren't linked (negative is used for preciousblock)
+        // nSequenceId can't be set higher than SEQ_ID_INIT_FROM_DISK{1} for blocks that aren't linked
+        // (negative is used for preciousblock, SEQ_ID_BEST_CHAIN_FROM_DISK{0} for active chain when loaded from disk)
+        if (!pindex->HaveNumChainTxs()) assert(pindex->nSequenceId <= SEQ_ID_INIT_FROM_DISK);
         // VALID_TRANSACTIONS is equivalent to nTx > 0 for all nodes (whether or not pruning has occurred).
         // HAVE_DATA is only equivalent to nTx > 0 (or VALID_TRANSACTIONS) if no pruning has occurred.
         if (!m_blockman.m_have_pruned) {
